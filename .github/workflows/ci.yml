@@ -60,12 +60,14 @@ jobs:
       - name: Build and start the mixnet, with a bridge replica
         run: cd katzenpost/docker && make start wait
       - name: Mesh replica bridged to replica1, and the docker test
-        run: cd katzenpost/docker && make reticulum-test pigeonhole_rns="$GITHUB_WORKSPACE"
+        run: tests/docker_bridge.sh test katzenpost/docker/mixnet-alpine
       - name: Logs
         if: failure()
         run: |
-          cd katzenpost/docker && timeout 30 make reticulum-logs | tail -80 || true
-          tail -40 mixnet-alpine/reticulum/replica.log || true
+          tests/docker_bridge.sh logs katzenpost/docker/mixnet-alpine | tail -80 || true
+          tail -40 katzenpost/docker/mixnet-alpine/reticulum/replica.log || true
       - name: Stop the mixnet
         if: always()
-        run: cd katzenpost/docker && make reticulum-stop stop || true
+        run: |
+          tests/docker_bridge.sh stop katzenpost/docker/mixnet-alpine || true
+          cd katzenpost/docker && make stop || true

@@ -49,3 +49,15 @@ def test_reply(v):
 def test_malformed(v):
     with pytest.raises(wire.WireError):
         wire.decode_query(bytes.fromhex(v["payload"]))
+
+
+@pytest.mark.parametrize("v", VECTORS["boxes"], ids=lambda v: v["name"])
+def test_box(v, tmp_path):
+    """What a replica answers a write with: the engine's verification, the
+    same rule the Katzenpost replica applies to a box the bridge pushes."""
+    from pigeonhole_rns.engine import Engine
+    from pigeonhole_rns.store import Store
+
+    e = Engine(Store(str(tmp_path / "v.sqlite")), b"\x01" * 16, b"\x02" * 32, box_ciphertext_size=v["ciphertext_size"])
+    q = wire.Query(wire.WRITE, bytes.fromhex(v["box_id"]), bytes.fromhex(v["signature"]), bytes.fromhex(v["ciphertext"]))
+    assert e.verify(q) == v["expect"]

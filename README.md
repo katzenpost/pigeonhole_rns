@@ -45,21 +45,21 @@ and drives a client through write, read, forward, delete and tombstone.
 
 ## Bridge test against the docker mixnet
 
-In a Katzenpost checkout, with this one beside it (or named by
-`pigeonhole_rns=/path`):
+With a Katzenpost checkout whose docker mixnet is up (`make -C docker start wait` there;
+its genconfig gives replica1 a bridge socket in its DataDir by default):
 
-    make -C docker start wait
-    make -C docker reticulum-test
+    tests/docker_bridge.sh test  /path/to/katzenpost/docker/mixnet-alpine
+    tests/docker_bridge.sh start /path/to/katzenpost/docker/mixnet-alpine   # just the container
+    tests/docker_bridge.sh logs  /path/to/katzenpost/docker/mixnet-alpine
+    tests/docker_bridge.sh stop  /path/to/katzenpost/docker/mixnet-alpine
 
-`genconfig --bridgeReplica 1`, which the docker Makefile passes by default,
-gives replica1 a bridge socket in its DataDir. `reticulum-test` builds this
-repository's `Dockerfile`, starts a container on the host network running a
-mesh replica bridged to that socket and `tests/docker_bot.py`, then runs
-`TestReticulumBridge` in Katzenpost's `client/`: a mixnet client writes a
-box, drops a job for the bot, the bot reads the box through the mesh (pulled
-over the bridge) and answers on another stream (pushed over the bridge), and
-the mixnet client reads the answer.
+`start` builds this repository's `Dockerfile` and runs a container on the host network with a
+mesh replica bridged to replica1's socket and `tests/docker_bot.py`; `test` then runs
+`TestReticulumBridge` in Katzenpost's `client/`: a mixnet client writes a box, drops a job for
+the bot, the bot reads the box through the mesh (pulled over the bridge) and answers on another
+stream (pushed over the bridge), and the mixnet client reads the answer.
 
-The bridge socket's wire format is defined by `testdata/bridge_socket_vectors.json`,
-which `tests/test_bridge_vectors.py` here and `replica/bridge_vectors_test.go`
-in Katzenpost both read; CI checks the two copies are the same file.
+The bridge socket's wire format and what a replica answers a write with are pinned by
+`testdata/bridge_socket_vectors.json`, made by `tests/make_vectors.py`. `tests/test_bridge_vectors.py`
+here and `replica/bridge_vectors_test.go` in Katzenpost both read it, and CI checks the two
+copies are the same file.
