@@ -1,0 +1,71 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: sudo apt-get update && sudo apt-get install -y gcc
+      - run: pip install -e .[test]
+      - run: pytest
+      - name: Two replicas and a client on a local Reticulum network
+        run: python tests/e2e_two_replicas.py --run-dir "$RUNNER_TEMP/e2e"
+
+  # The bridge socket's wire format is shared with the Katzenpost replica: the
+  # vectors here and in katzenpost's replica/testdata must be the same file.
+  vectors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: katzenpost/katzenpost
+          ref: reticulum-bridge
+          path: katzenpost
+      - run: cmp testdata/bridge_socket_vectors.json katzenpost/replica/testdata/bridge_socket_vectors.json
+
+  # A mixnet client and a mesh client exchange boxes through the bridge, on a
+  # docker mixnet whose replica1 has a bridge socket.
+  bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      no_mixdecoy: true
+      no_decoy: true
+      epoch_duration: 2m
+      no_metrics: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: katzenpost/katzenpost
+          ref: reticulum-bridge
+          path: katzenpost
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.26"
+          cache: false
+      - name: Configure podman socket
+        run: systemctl --user start podman.socket || true
+      - name: Build and start the mixnet, with a bridge replica
+        run: cd katzenpost/docker && make start wait
+      - name: Mesh replica bridged to replica1, and the docker test
+        run: cd katzenpost/docker && make reticulum-test pigeonhole_rns="$GITHUB_WORKSPACE"
+      - name: Logs
+        if: failure()
+        run: |
+          cd katzenpost/docker && timeout 30 make reticulum-logs | tail -80 || true
+          tail -40 mixnet-alpine/reticulum/replica.log || true
+      - name: Stop the mixnet
+        if: always()
+        run: cd katzenpost/docker && make reticulum-stop stop || true

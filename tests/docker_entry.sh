@@ -19,7 +19,7 @@ cat > "$dir/rns/config" <<EOF
 [logging]
   loglevel = 4
 EOF
-cd /go/katzenpost/reticulum
+cd /pigeonhole_rns
 python -m pigeonhole_rns.cli --config "$dir/rns" --box-size 0 -v replica \
   --storage "$dir/store" --announce-interval 5 \
   --bridge-socket "$net/replica$bridge_replica/bridge.sock" > "$dir/replica.log" 2>&1 &
