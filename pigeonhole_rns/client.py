@@ -40,7 +40,8 @@ def position(cap, index: int):
 
 class Client:
     def __init__(self, configdir: Optional[str], box_plaintext_size: int, loglevel: int = RNS.LOG_NOTICE):
-        self.reticulum = RNS.Reticulum(configdir=configdir, loglevel=loglevel)
+        # Reticulum is one per process and only starts on the main thread; a caller that started it there is reused.
+        self.reticulum = RNS.Reticulum.get_instance() or RNS.Reticulum(configdir=configdir, loglevel=loglevel)
         self.box_plaintext_size = box_plaintext_size
         self.replicas: Dict[bytes, Tuple[bytes, bool]] = {}
         self.tombstones: Set[bytes] = set()
