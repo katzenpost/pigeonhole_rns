@@ -16,6 +16,55 @@ The mixnet half of the bridge, a unix socket on the Katzenpost replica, is in
 the Katzenpost repository (`replica/bridge.go`); the group chat client for
 the mesh is [katzenrns](https://github.com/katzenpost/katzenrns).
 
+## Query modes
+
+A client opens a Link to a replica's `pigeonhole.replica` destination and
+sends each query in one of two modes. Both carry the same query and reply
+bytes (`wire.py`) and one destination serves both.
+
+1. **Requests.** Each query is a Link request to path `write` or `read`;
+   one over the Link MDU travels as a Resource. Replicas also ask each other
+   on path `peek`, which exists only in this mode.
+2. **Channel.** Each query and reply is a run of Channel messages on the
+   Link, for Reticulum stacks with Links and Channel but no Link requests
+   or Resources. The query's first byte, 0 read or 1 write, picks the
+   handler.
+
+The announce's app data is one byte of flags: bit 0 says the replica is a
+bridge, bit 1 that it serves mode 2. A client in mode 2 uses only replicas
+announcing bit 1.
+
+### Channel framing
+
+Every mode 2 message is one Channel message of MSGTYPE `0x5048`:
+
+    request id   u16, big endian
+    piece index  u8
+    piece count  u8
+    piece        the rest
+
+A query or reply is cut into 1 to 255 pieces of at most the Channel MDU
+minus 4 bytes, the Channel MDU being the Link MDU minus Channel's 6 byte
+envelope: 421 bytes on a 500 byte MTU link. The receiver reassembles by
+request id and drops a request whose pieces disagree on the count, or that
+is incomplete after 60 seconds. A reply carries its query's request id.
+
+### Bytes on the wire
+
+Link packet bytes sent and received by a client for one 1000 byte box (a
+1117 byte write query), measured by `tests/e2e_two_replicas.py --box-size
+1000` on a warm Link:
+
+| link MTU | operation | mode 1 sent / received | mode 2 sent / received |
+|---|---|---|---|
+| 500   | write | 1484 / 297 | 1468 / 428 |
+| 500   | read  | 329 / 1436 | 480 / 1456 |
+| 16384 | write | 1219 / 99  | 1318 / 198 |
+| 16384 | read  | 131 / 1187 | 250 / 1306 |
+
+At 500 bytes mode 1 sends a Resource (advertisement, parts, proof) and
+mode 2 three frames, each with its own delivery proof.
+
 ## Install
 
     pip install -e .          # brings rns and the hpqc Python port from PyPI
@@ -34,14 +83,18 @@ Katzenpost replica on the same host.
     pigeonhole-rns new-cap
     pigeonhole-rns --config ~/.reticulum write --writecap <hex> --index 0 "yo what up"
     pigeonhole-rns --config ~/.reticulum read  --readcap <hex>  --index 0
+    pigeonhole-rns --config ~/.reticulum read  --readcap <hex>  --index 0 --mode channel
 
 ## Test
 
     pytest
     python tests/e2e_two_replicas.py --run-dir /some/scratch/dir
+    python tests/e2e_two_replicas.py --run-dir /some/scratch/dir --box-size 1000 --mtu-discovery no
 
 The end to end test starts two replica processes on a local TCP interface
-and drives a client through write, read, forward, delete and tombstone.
+and drives a client through write, read, forward, delete and tombstone in
+mode 1, then write, read, delete and tombstone in mode 2 with boxes crossing
+between the modes, and prints the bytes each mode puts on the link.
 
 ## Bridge test against the docker mixnet
 
