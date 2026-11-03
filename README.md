@@ -49,6 +49,11 @@ envelope: 421 bytes on a 500 byte MTU link. The receiver reassembles by
 request id and drops a request whose pieces disagree on the count, or that
 is incomplete after 60 seconds. A reply carries its query's request id.
 
+A replica handles mode 2 queries on 2 worker threads per Link, with up to
+16 more queued per Link and at most 32 handled at once across the replica.
+A query arriving to a full queue is dropped; the client times out and asks
+again.
+
 ### Bytes on the wire
 
 Link packet bytes sent and received by a client for one 1000 byte box (a

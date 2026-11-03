@@ -8,6 +8,7 @@ handoff, garbage collection and announcing."""
 from __future__ import annotations
 
 import os
+import queue
 import threading
 import time
 from typing import Optional
@@ -18,6 +19,13 @@ from . import APP_NAME, ASPECT, channel, engine, rnsio, wire
 from .bridge import BridgeSocket
 from .store import Store
 
+
+
+# Channel mode's limits: workers per Link, queries waiting per Link, and handlers running at once
+# across the replica. Request mode handles one request at a time per Link.
+CHANNEL_WORKERS = 2
+CHANNEL_QUEUE = 16
+CHANNEL_HANDLERS = 32
 
 class Replica:
     def __init__(
@@ -66,6 +74,7 @@ class Replica:
         self.forward_interval = forward_interval
         self.handoff_interval = handoff_interval
         self._stop = threading.Event()
+        self._channel_handlers = threading.BoundedSemaphore(CHANNEL_HANDLERS)
         RNS.Transport.register_announce_handler(rnsio.AnnounceHandler(self._on_announce))
 
     # ---- announces ----
@@ -96,8 +105,32 @@ class Replica:
         return self.engine.handle_read(bytes(data), self._reachable(), self.links.peek, self._bridge_read())
 
     def _on_link(self, link) -> None:
-        # Handlers may block on peeks and on the reply's Channel window, so not on Reticulum's thread.
-        channel.Endpoint(link, lambda ep, rid, data: threading.Thread(target=self._on_frame_query, args=(ep, rid, data), daemon=True).start())
+        # Handlers may block on peeks and on the reply's Channel window, so they run on worker
+        # threads, not Reticulum's: CHANNEL_WORKERS per Link, taking queries from a queue of
+        # CHANNEL_QUEUE, and at most CHANNEL_HANDLERS handling at once across the replica.
+        # A query arriving to a full queue is dropped; its client times out and asks again.
+        queries: "queue.Queue" = queue.Queue(maxsize=CHANNEL_QUEUE)
+
+        def accept(ep, rid, data):
+            try:
+                queries.put_nowait((ep, rid, data))
+            except queue.Full:
+                RNS.log("pigeonhole: channel queue full on a link, query dropped", RNS.LOG_WARNING)
+
+        def work():
+            while not self._stop.is_set():
+                try:
+                    ep, rid, data = queries.get(timeout=1)
+                except queue.Empty:
+                    if link.status == RNS.Link.CLOSED:
+                        return
+                    continue
+                with self._channel_handlers:
+                    self._on_frame_query(ep, rid, data)
+
+        channel.Endpoint(link, accept)
+        for _ in range(CHANNEL_WORKERS):
+            threading.Thread(target=work, daemon=True).start()
 
     def _on_frame_query(self, ep: channel.Endpoint, request_id: int, data: bytes) -> None:
         """Mode 2: the query's op byte picks the handler; peek stays request only."""
