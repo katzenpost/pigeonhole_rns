@@ -39,22 +39,32 @@ def position(cap, index: int):
 
 
 class Client:
-    def __init__(self, configdir: Optional[str], box_plaintext_size: int, loglevel: int = RNS.LOG_NOTICE):
+    def __init__(self, configdir: Optional[str], box_plaintext_size: int, loglevel: int = RNS.LOG_NOTICE, mode: str = "request"):
+        """mode "request" sends queries as Link requests (mode 1); "channel" as
+        Channel frames (mode 2), only to replicas announcing it."""
+        if mode not in ("request", "channel"):
+            raise ValueError("mode must be request or channel")
+        self.mode = mode
         # Reticulum is one per process and only starts on the main thread; a caller that started it there is reused.
         self.reticulum = RNS.Reticulum.get_instance() or RNS.Reticulum(configdir=configdir, loglevel=loglevel)
         self.box_plaintext_size = box_plaintext_size
         self.replicas: Dict[bytes, Tuple[bytes, bool]] = {}
         self.tombstones: Set[bytes] = set()
+        self.channel_replicas: Set[bytes] = set()
         self.links = rnsio.Links()
         self._mu = threading.Lock()
         RNS.Transport.register_announce_handler(rnsio.AnnounceHandler(self._on_announce))
 
-    def _on_announce(self, dest: bytes, identity_hash: bytes, bridge: bool) -> None:
+    def _on_announce(self, dest: bytes, identity_hash: bytes, bridge: bool, channel: bool = False) -> None:
         with self._mu:
             cur = self.replicas.get(dest)
             if cur is not None and cur[0] != identity_hash:
                 return
             self.replicas[dest] = (identity_hash, bridge)
+            if channel:
+                self.channel_replicas.add(dest)
+            else:
+                self.channel_replicas.discard(dest)
 
     def wait_for_replica(self, timeout: float = 30.0) -> bool:
         deadline = time.time() + timeout
@@ -66,7 +76,7 @@ class Client:
 
     def entry(self) -> Optional[bytes]:
         with self._mu:
-            dests = list(self.replicas)
+            dests = list(self.channel_replicas if self.mode == "channel" else self.replicas)
         cands = rnsio.reachable(dests)
         if not cands:
             return None
@@ -78,7 +88,7 @@ class Client:
         dest = dest or self.entry()
         if dest is None:
             return None
-        raw = self.links.request(dest, "write", wire.encode_write(box_id, signature, ciphertext))
+        raw = self._query(dest, "write", wire.encode_write(box_id, signature, ciphertext))
         return None if raw is None else raw[0]
 
     def read_box(self, box_id: bytes, dest: Optional[bytes] = None, path: str = "read") -> Optional[wire.Reply]:
@@ -87,7 +97,7 @@ class Client:
         dest = dest or self.entry()
         if dest is None:
             return None
-        raw = self.links.request(dest, path, wire.encode_read(box_id))
+        raw = self._query(dest, path, wire.encode_read(box_id))
         if raw is None:
             return None
         try:
@@ -97,6 +107,11 @@ class Client:
         if r.code == wire.TOMBSTONE:
             self.tombstones.add(box_id)
         return r
+
+    def _query(self, dest: bytes, path: str, data: bytes) -> Optional[bytes]:
+        if self.mode == "channel" and path != "peek":
+            return self.links.channel_request(dest, data)
+        return self.links.request(dest, path, data)
 
     # ---- streams ----
 

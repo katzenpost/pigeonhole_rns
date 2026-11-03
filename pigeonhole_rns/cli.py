@@ -42,6 +42,9 @@ def main(argv=None) -> int:
     rd.add_argument("--readcap", required=True, help="hex read capability")
     rd.add_argument("--index", type=int, default=0)
 
+    for q in (w, d, rd):
+        q.add_argument("--mode", choices=("request", "channel"), default="request", help="query as Link requests, or as Channel messages")
+
     a = p.parse_args(argv)
     loglevel = RNS.LOG_NOTICE + a.verbose
 
@@ -59,7 +62,7 @@ def main(argv=None) -> int:
 
     from .client import Client
 
-    c = Client(a.config, a.box_size, loglevel=loglevel)
+    c = Client(a.config, a.box_size, loglevel=loglevel, mode=a.mode)
     if not c.wait_for_replica():
         print("no replica reachable", file=sys.stderr)
         return 1

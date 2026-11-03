@@ -11,11 +11,12 @@ from typing import Dict, Optional
 
 import RNS
 
-from . import APP_NAME, ASPECT, ASPECT_FILTER, wire
+from . import APP_NAME, ASPECT, ASPECT_FILTER, channel, wire
 
 
 class AnnounceHandler:
-    """Feeds replica announces to a callback (dest_hash, identity_hash, bridge)."""
+    """Feeds replica announces to a callback (dest_hash, identity_hash, bridge,
+    channel). App data bit 0 is bridge, bit 1 serves query mode 2."""
 
     aspect_filter = ASPECT_FILTER
 
@@ -23,8 +24,8 @@ class AnnounceHandler:
         self.on_replica = on_replica
 
     def received_announce(self, destination_hash, announced_identity, app_data):
-        bridge = bool(app_data) and app_data[0] == 1
-        self.on_replica(bytes(destination_hash), bytes(announced_identity.hash), bridge)
+        flags = app_data[0] if app_data else 0
+        self.on_replica(bytes(destination_hash), bytes(announced_identity.hash), bool(flags & 1), bool(flags & 2))
 
 
 def reachable(dests) -> list:
@@ -47,6 +48,9 @@ class Links:
         self._links: Dict[bytes, RNS.Link] = {}
         self._locks: Dict[bytes, threading.Lock] = {}
         self._mu = threading.Lock()
+        self._endpoints: Dict[bytes, channel.Endpoint] = {}
+        self._replies: Dict[int, list] = {}
+        self._next_id = 0
 
     def _lock(self, dest: bytes) -> threading.Lock:
         with self._mu:
@@ -97,6 +101,35 @@ class Links:
             resp = receipt.response
             return bytes(resp) if resp is not None else None
 
+    def channel_request(self, dest: bytes, data: bytes) -> Optional[bytes]:
+        """Query mode 2: the same bytes as request(), as Channel frames."""
+        with self._lock(dest):
+            link = self._link(dest)
+            if link is None:
+                return None
+            with self._mu:
+                ep = self._endpoints.get(link.link_id)
+                if ep is None:
+                    self._endpoints = {k: e for k, e in self._endpoints.items() if e.link.status != RNS.Link.CLOSED}
+                    ep = self._endpoints[link.link_id] = channel.Endpoint(link, self._on_reply)
+                rid = self._next_id
+                self._next_id = (rid + 1) & 0xFFFF
+                slot = self._replies[rid] = [threading.Event(), None]
+            try:
+                if not ep.send(rid, data, self.request_timeout) or not slot[0].wait(self.request_timeout):
+                    return None
+                return slot[1]
+            finally:
+                with self._mu:
+                    self._replies.pop(rid, None)
+
+    def _on_reply(self, _ep, request_id: int, data: bytes) -> None:
+        with self._mu:
+            slot = self._replies.get(request_id)
+        if slot is not None:
+            slot[1] = data
+            slot[0].set()
+
     def peek(self, dest: bytes, box_id: bytes) -> Optional[wire.Reply]:
         raw = self.request(dest, "peek", wire.encode_read(box_id))
         if raw is None:
@@ -110,6 +143,7 @@ class Links:
         with self._mu:
             links = list(self._links.values())
             self._links.clear()
+            self._endpoints.clear()
         for link in links:
             try:
                 link.teardown()
