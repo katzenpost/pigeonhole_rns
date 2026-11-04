@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: © 2026 David Stainton
 # SPDX-License-Identifier: AGPL-3.0-only
-"""pigeonhole-rns: run a replica, or read and write a stream as a client."""
+"""replica_rns: a Pigeonhole storage replica for Reticulum, with commands to test one."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ DEFAULT_BOX = 1000
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="pigeonhole-rns", description=__doc__)
+    p = argparse.ArgumentParser(prog="replica_rns", description=__doc__)
     p.add_argument("--config", help="Reticulum config directory")
     p.add_argument("--box-size", type=int, default=DEFAULT_BOX, help="box plaintext size in bytes, the same on every replica and the mixnet")
     p.add_argument("-v", "--verbose", action="count", default=0)

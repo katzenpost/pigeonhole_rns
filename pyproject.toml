@@ -8,7 +8,7 @@ build-backend = "flit_core.buildapi"
 [project]
 name = "pigeonhole-rns"
 version = "0.0.1"
-description = "Pigeonhole storage replica and client for Reticulum mesh networks."
+description = "Pigeonhole storage replica daemon for Reticulum mesh networks."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "AGPL-3.0-only"
@@ -22,7 +22,7 @@ dependencies = [
 test = ["pytest>=8.0"]
 
 [project.scripts]
-pigeonhole-rns = "pigeonhole_rns.cli:main"
+replica_rns = "pigeonhole_rns.cli:main"
 
 [tool.flit.module]
 name = "pigeonhole_rns"
