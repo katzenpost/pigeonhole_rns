@@ -1,8 +1,10 @@
-# Pigeonhole over Reticulum
+# replica_rns
 
-A Pigeonhole storage replica and client for Reticulum mesh networks, in pure
-Python on the RNS library, and the mesh half of a bridge to a Katzenpost
-mixnet. The design is the Pigeonhole over Reticulum specification on the
+A Pigeonhole storage replica daemon for Reticulum mesh networks, in pure
+Python on the RNS library. It stores boxes, replicates them to the other
+replicas it hears, and is the mesh half of a bridge to a Katzenpost mixnet.
+Pigeonhole is the protocol; clients live elsewhere, such as the group chat
+client [katzenrns](https://github.com/katzenpost/katzenrns). The design is the Pigeonhole over Reticulum specification on the
 Katzenpost website; this is its open mesh profile.
 
 A replica is any node that announces `pigeonhole.replica`. Boxes are placed
@@ -13,8 +15,7 @@ off when it can. Reads walk the order past the owners. Boxes are BACAP boxes
 verified with `hpqc.bacap`, the same object the mixnet stores.
 
 The mixnet half of the bridge, a unix socket on the Katzenpost replica, is in
-the Katzenpost repository (`replica/bridge.go`); the group chat client for
-the mesh is [katzenrns](https://github.com/katzenpost/katzenrns).
+the Katzenpost repository (`replica/bridge.go`).
 
 ## Query modes
 
@@ -72,23 +73,28 @@ mode 2 three frames, each with its own delivery proof.
 
 ## Install
 
+A Linux x86_64 executable, a wheel and an sdist are attached to each
+[release](https://github.com/katzenpost/pigeonhole_rns/releases). From source:
+
     pip install -e .          # brings rns and the hpqc Python port from PyPI
 
 ## Run a replica
 
-    pigeonhole-rns --config ~/.reticulum --box-size 1000 replica --storage ~/pigeonhole
+    replica_rns --config ~/.reticulum --box-size 1000 replica --storage ~/pigeonhole
 
 `--box-size` is the box plaintext size and must be the same on every replica
 and, through a bridge, equal to the mixnet's. A bridge adds
 `--bridge-socket /path/to/replica/bridge.sock`, the `BridgeSocket` of a
 Katzenpost replica on the same host.
 
-## Use it
+## Check a replica
 
-    pigeonhole-rns new-cap
-    pigeonhole-rns --config ~/.reticulum write --writecap <hex> --index 0 "yo what up"
-    pigeonhole-rns --config ~/.reticulum read  --readcap <hex>  --index 0
-    pigeonhole-rns --config ~/.reticulum read  --readcap <hex>  --index 0 --mode channel
+These commands write and read single boxes, to test replicas:
+
+    replica_rns new-cap
+    replica_rns --config ~/.reticulum write --writecap <hex> --index 0 "yo what up"
+    replica_rns --config ~/.reticulum read  --readcap <hex>  --index 0
+    replica_rns --config ~/.reticulum read  --readcap <hex>  --index 0 --mode channel
 
 ## Test
 

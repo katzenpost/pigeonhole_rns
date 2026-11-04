@@ -1,0 +1,62 @@
+name: release
+# A vX.Y.Z tag builds, smoke tests and publishes a GitHub release. A manual run does the
+# same and keeps the files as workflow artifacts, publishing nothing, as does a pull request
+# that changes how the release is built.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths: [.github/workflows/release.yml, scripts/pyinstaller_entry.py, scripts/smoke-binary.sh, pyproject.toml]
+permissions:
+  contents: write
+jobs:
+  linux:
+    # The oldest runner glibc, so the executable runs on older distributions too.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # gcc for highctidh.
+      - run: sudo apt-get update && sudo apt-get install -y gcc
+      - name: Version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            v=${GITHUB_REF_NAME#v}
+            p=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+            [ "$v" = "$p" ] || { echo "tag $GITHUB_REF_NAME but pyproject.toml says $p"; exit 1; }
+          else
+            v=$(git describe --tags --always)
+          fi
+          echo "NAME=replica_rns-$v-linux-x86_64" >> "$GITHUB_ENV"
+      - run: timeout 1200 pip install . pyinstaller build
+      - name: Executable
+        # RNS lists its interfaces by globbing its own directory for .py files, so its source
+        # goes in as data beside the frozen modules. highctidh finds its per-field-size
+        # extensions with find_spec, and hpqc and highctidh read their versions from metadata.
+        run: |
+          rns=$(python -c 'import os, RNS; print(os.path.dirname(RNS.__file__))')
+          timeout 1200 pyinstaller --noconfirm --onefile --name "$NAME" \
+            --collect-submodules RNS --add-data "$rns:RNS" \
+            --hidden-import highctidh_511 --hidden-import highctidh_512 \
+            --hidden-import highctidh_1024 --hidden-import highctidh_2048 \
+            --copy-metadata hpqc --copy-metadata highctidh --exclude-module tkinter \
+            scripts/pyinstaller_entry.py
+      - run: timeout 600 python -m build --outdir dist
+      - name: Smoke test
+        run: timeout 1500 scripts/smoke-binary.sh "dist/$NAME" "$RUNNER_TEMP/smoke"
+      - run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: dist/*
+      - name: Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "replica_rns $GITHUB_REF_NAME" --generate-notes dist/*

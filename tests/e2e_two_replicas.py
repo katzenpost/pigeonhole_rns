@@ -64,6 +64,7 @@ def main() -> int:
     ap.add_argument("--settle", type=float, default=12.0, help="seconds to let announces and paths settle")
     ap.add_argument("--box-size", type=int, default=100)
     ap.add_argument("--mtu-discovery", choices=("yes", "no"), default="yes", help="no keeps links at the 500 byte MTU")
+    ap.add_argument("--replica-bin", help="run the replicas from this executable instead of the source tree")
     a = ap.parse_args()
     BOX = a.box_size
     hub_config, leaf_config = HUB_CONFIG % (a.mtu_discovery, HUB_PORT), LEAF_CONFIG % (a.mtu_discovery, HUB_PORT)
@@ -83,7 +84,7 @@ def main() -> int:
             log = open(os.path.join(run, "replica-%s.log" % name), "w")
             procs.append(
                 subprocess.Popen(
-                    [sys.executable, "-m", "pigeonhole_rns.cli", "--config", cfgdir, "--box-size", str(BOX), "-v",
+                    ([a.replica_bin] if a.replica_bin else [sys.executable, "-m", "pigeonhole_rns.cli"]) + ["--config", cfgdir, "--box-size", str(BOX), "-v",
                      "replica", "--storage", os.path.join(run, "store-" + name), "--announce-interval", "3"],
                     stdout=log, stderr=subprocess.STDOUT, env=env, cwd=pkg_root,
                 )
