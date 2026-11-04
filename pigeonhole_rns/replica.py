@@ -1,22 +1,31 @@
 # SPDX-FileCopyrightText: © 2026 David Stainton
 # SPDX-License-Identifier: AGPL-3.0-only
 """The replica daemon: one Reticulum destination with three request paths,
-`write` and `read` for clients and `peek` for other replicas, and threads
-for forwarding, handoff, garbage collection and announcing."""
+`write` and `read` for clients and `peek` for other replicas, the same
+client queries as Channel frames (mode 2), and threads for forwarding,
+handoff, garbage collection and announcing."""
 
 from __future__ import annotations
 
 import os
+import queue
 import threading
 import time
 from typing import Optional
 
 import RNS
 
-from . import APP_NAME, ASPECT, engine, rnsio, wire
+from . import APP_NAME, ASPECT, channel, engine, rnsio, wire
 from .bridge import BridgeSocket
 from .store import Store
 
+
+
+# Channel mode's limits: workers per Link, queries waiting per Link, and handlers running at once
+# across the replica. Request mode handles one request at a time per Link.
+CHANNEL_WORKERS = 2
+CHANNEL_QUEUE = 16
+CHANNEL_HANDLERS = 32
 
 class Replica:
     def __init__(
@@ -45,6 +54,7 @@ class Replica:
         self.destination.register_request_handler("write", response_generator=self._on_write, allow=RNS.Destination.ALLOW_ALL)
         self.destination.register_request_handler("read", response_generator=self._on_read, allow=RNS.Destination.ALLOW_ALL)
         self.destination.register_request_handler("peek", response_generator=self._on_peek, allow=RNS.Destination.ALLOW_ALL)
+        self.destination.set_link_established_callback(self._on_link)
 
         self.bridge = BridgeSocket(bridge_socket) if bridge_socket else None
         # Box plaintext is length prefixed by the client and the AEAD adds a
@@ -64,11 +74,12 @@ class Replica:
         self.forward_interval = forward_interval
         self.handoff_interval = handoff_interval
         self._stop = threading.Event()
+        self._channel_handlers = threading.BoundedSemaphore(CHANNEL_HANDLERS)
         RNS.Transport.register_announce_handler(rnsio.AnnounceHandler(self._on_announce))
 
     # ---- announces ----
 
-    def _on_announce(self, dest: bytes, identity_hash: bytes, bridge: bool) -> None:
+    def _on_announce(self, dest: bytes, identity_hash: bytes, bridge: bool, _channel: bool = False) -> None:
         if dest == self.engine.self_dest:
             return
         if self.engine.heard(dest, identity_hash, bridge):
@@ -77,7 +88,7 @@ class Replica:
             RNS.log("pigeonhole: ignoring announce with a changed key for %s" % RNS.prettyhexrep(dest), RNS.LOG_WARNING)
 
     def announce(self) -> None:
-        self.destination.announce(app_data=bytes([1 if self.bridge else 0]))
+        self.destination.announce(app_data=bytes([(1 if self.bridge else 0) | 2]))
 
     # ---- request handlers, called on Reticulum's threads ----
 
@@ -92,6 +103,44 @@ class Replica:
 
     def _on_read(self, path, data, request_id, link_id, remote_identity, requested_at):
         return self.engine.handle_read(bytes(data), self._reachable(), self.links.peek, self._bridge_read())
+
+    def _on_link(self, link) -> None:
+        # Handlers may block on peeks and on the reply's Channel window, so they run on worker
+        # threads, not Reticulum's: CHANNEL_WORKERS per Link, taking queries from a queue of
+        # CHANNEL_QUEUE, and at most CHANNEL_HANDLERS handling at once across the replica.
+        # A query arriving to a full queue is dropped; its client times out and asks again.
+        queries: "queue.Queue" = queue.Queue(maxsize=CHANNEL_QUEUE)
+
+        def accept(ep, rid, data):
+            try:
+                queries.put_nowait((ep, rid, data))
+            except queue.Full:
+                RNS.log("pigeonhole: channel queue full on a link, query dropped", RNS.LOG_WARNING)
+
+        def work():
+            while not self._stop.is_set():
+                try:
+                    ep, rid, data = queries.get(timeout=1)
+                except queue.Empty:
+                    if link.status == RNS.Link.CLOSED:
+                        return
+                    continue
+                with self._channel_handlers:
+                    self._on_frame_query(ep, rid, data)
+
+        channel.Endpoint(link, accept)
+        for _ in range(CHANNEL_WORKERS):
+            threading.Thread(target=work, daemon=True).start()
+
+    def _on_frame_query(self, ep: channel.Endpoint, request_id: int, data: bytes) -> None:
+        """Mode 2: the query's op byte picks the handler; peek stays request only."""
+        if data[:1] == bytes([wire.READ]):
+            reply = self.engine.handle_read(data, self._reachable(), self.links.peek, self._bridge_read())
+        elif data[:1] == bytes([wire.WRITE]):
+            reply = self.engine.handle_write(data, self._reachable())
+        else:
+            reply = wire.encode_reply(wire.INVALID_PAYLOAD)
+        ep.send(request_id, reply)
 
     def _bridge_read(self):
         return self.bridge.read if self.bridge is not None else None
