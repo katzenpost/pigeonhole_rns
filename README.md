@@ -187,6 +187,13 @@ and announces bits 1, 2 and 3; Python replicas ask it in mode 2.
     cd rust && cargo build --release
     rust/target/release/replica_rns-rs --config ~/.reticulum --box-size 1000 replica --storage ~/pigeonhole
 
+Two limits of Reticulum-rs at that revision: as a transport node it does not
+relay to a Python node on the last hop (it keeps the transport header Python
+RNS expects stripped), so the Rust replica does not relay, whatever
+`enable_transport` says, and boxes cross it only stored and forwarded; and
+its TCP client interfaces do not set `TCP_NODELAY` (the replica's TCP server
+interface is its own and does).
+
 It asks other replicas in mode 2, so reaches those announcing bit 2. With the
 optional feature `reticulum-py` it also falls back to Link requests and
 Resources through Python RNS, embedded, for replicas that do not announce bit

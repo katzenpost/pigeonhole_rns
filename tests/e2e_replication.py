@@ -98,11 +98,12 @@ def main() -> int:
         cmd = [os.path.abspath(a.rust_bin)] if i in rust else [sys.executable, "-m", "pigeonhole_rns.cli"]
         extra = []
         if i in rust and a.rust_py:
-            # The Python instance reaches the mesh through the Rust replica's own listener.
+            # The Python instance connects to the other replicas itself: Reticulum-rs, at the
+            # revision used, does not relay to a Python node on the last hop.
             pd = os.path.join(run, "rns-py-%d" % i)
             os.makedirs(pd, exist_ok=True)
             with open(os.path.join(pd, "config"), "w") as f:
-                f.write(CLIENT_CFG % (TO % (i, a.port + i)))
+                f.write(CLIENT_CFG % "".join(TO % (j, a.port + j) for j in range(n) if j != i))
             extra = ["--py-config", pd]
         procs[i] = subprocess.Popen(
             cmd + ["--config", d, "--box-size", str(BOX), "replica",

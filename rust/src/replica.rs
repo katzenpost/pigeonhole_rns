@@ -15,7 +15,6 @@ use reticulum::destination::link::{Link, LinkEvent, LinkStatus};
 use reticulum::hash::AddressHash;
 use reticulum::identity::PrivateIdentity;
 use reticulum::iface::tcp_client::TcpClient;
-use reticulum::iface::tcp_server::TcpServer;
 use reticulum::iface::udp::UdpInterface;
 use reticulum::transport::{TimerConfig, Transport, TransportConfig};
 use tokio::sync::broadcast::error::RecvError;
@@ -235,6 +234,28 @@ impl Replica {
     }
 }
 
+/// A TCP server interface, as Reticulum-rs's but with TCP_NODELAY on each connection, as
+/// Python RNS sets: without it a reply waits for the delayed ACK of the proof before it.
+fn tcp_server(addr: String, m: Arc<Mutex<reticulum::iface::InterfaceManager>>) {
+    tokio::spawn(async move {
+        let l = loop {
+            match tokio::net::TcpListener::bind(&addr).await {
+                Ok(l) => break l,
+                Err(e) => {
+                    log::warn!("pigeonhole: listen on {addr}: {e}");
+                    sleep(Duration::from_secs(5)).await
+                }
+            }
+        };
+        loop {
+            if let Ok((s, peer)) = l.accept().await {
+                let _ = s.set_nodelay(true);
+                m.lock().await.spawn(TcpClient::new_from_stream(peer.to_string(), s), TcpClient::spawn);
+            }
+        }
+    });
+}
+
 pub async fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&o.storage)?;
     let me = identity(&o.storage.join("identity"))?;
@@ -250,15 +271,22 @@ pub async fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
     let cfg_path = o.config_dir.join("config");
     let cfg = config::parse(&std::fs::read_to_string(&cfg_path).map_err(|e| format!("{}: {e}", cfg_path.display()))?);
     let timers = TimerConfig { in_link_stale: LINK_STALE, out_link_stale: LINK_STALE, ..Default::default() };
-    let mut t = Transport::new(
-        TransportConfig::new("replica", &me).set_retransmit(cfg.transport).set_timer_config(timers),
-    );
+    // shortcut: Reticulum-rs at the pinned revision keeps the transport header on the last hop
+    // to a Python node, which drops the packet, so relaying would draw traffic it cannot
+    // deliver; boxes still cross this replica, stored and forwarded. Relay again once fixed.
+    if cfg.transport {
+        log::info!("pigeonhole: enable_transport ignored, this replica does not relay");
+    }
+    let mut t = Transport::new(TransportConfig::new("replica", &me).set_retransmit(false).set_timer_config(timers));
     {
         let m = t.iface_manager();
         let mut m = m.lock().await;
         for i in &cfg.ifaces {
             match i {
-                Iface::TcpServer(a) => m.spawn(TcpServer::new(a.as_str(), t.iface_manager()), TcpServer::spawn),
+                Iface::TcpServer(a) => {
+                    tcp_server(a.clone(), t.iface_manager());
+                    continue;
+                }
                 Iface::TcpClient(a) => m.spawn(TcpClient::new(a.as_str()), TcpClient::spawn),
                 Iface::Udp { listen, forward } => {
                     m.spawn(UdpInterface::new(listen.as_str(), forward.as_deref(), false), UdpInterface::spawn)
