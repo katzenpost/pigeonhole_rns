@@ -45,13 +45,19 @@ class Frame(MessageBase):
         self.data = bytes(raw[HEADER.size :])
 
 
-def split(request_id: int, data: bytes, piece_size: int) -> List[Frame]:
+class PushFrame(Frame):
+    """A piece of a push, framed as a query's; its request id is the replica's own."""
+
+    MSGTYPE = 0x5049
+
+
+def split(request_id: int, data: bytes, piece_size: int, cls=Frame) -> List[Frame]:
     if piece_size < 1:
         raise ValueError("piece size %d" % piece_size)
     count = max(1, -(-len(data) // piece_size))
     if count > MAX_PIECES:
         raise ValueError("%d bytes need %d pieces of %d" % (len(data), count, piece_size))
-    return [Frame(request_id, i, count, data[i * piece_size : (i + 1) * piece_size]) for i in range(count)]
+    return [cls(request_id, i, count, data[i * piece_size : (i + 1) * piece_size]) for i in range(count)]
 
 
 class Reassembler:
@@ -85,18 +91,29 @@ class Reassembler:
 
 class Endpoint:
     """Mode 2 on one Link: calls on_message(endpoint, request_id, bytes) on Reticulum's
-    thread for each reassembled message, and sends messages as frames."""
+    thread for each reassembled message, and on_push(endpoint, bytes) for each push when
+    given, and sends messages as frames."""
 
-    def __init__(self, link: "RNS.Link", on_message: Callable[["Endpoint", int, bytes], None]):
+    def __init__(self, link: "RNS.Link", on_message: Callable[["Endpoint", int, bytes], None],
+                 on_push: Optional[Callable[["Endpoint", bytes], None]] = None):
         self.link = link
         self.channel = link.get_channel()
         self.on_message = on_message
+        self.on_push = on_push
         self.reassembler = Reassembler()
+        self.pushes = Reassembler()
         self._send_lock = threading.Lock()
         self.channel.register_message_type(Frame)
+        if on_push is not None:
+            self.channel.register_message_type(PushFrame)
         self.channel.add_message_handler(self._on_frame)
 
     def _on_frame(self, msg) -> bool:
+        if isinstance(msg, PushFrame):
+            data = self.pushes.feed(msg)
+            if data is not None and self.on_push is not None:
+                self.on_push(self, data)
+            return True
         if not isinstance(msg, Frame):
             return False
         data = self.reassembler.feed(msg)
@@ -107,10 +124,10 @@ class Endpoint:
     def piece_size(self) -> int:
         return self.channel.mdu - HEADER.size
 
-    def send(self, request_id: int, data: bytes, timeout: float = 60.0) -> bool:
+    def send(self, request_id: int, data: bytes, timeout: float = 60.0, cls=Frame) -> bool:
         """Sends every frame, waiting for the Channel window. Not on Reticulum's
         thread: delivery proofs that open the window arrive there."""
-        frames = split(request_id, data, self.piece_size())
+        frames = split(request_id, data, self.piece_size(), cls)
         deadline = time.time() + timeout
         with self._send_lock:
             for f in frames:

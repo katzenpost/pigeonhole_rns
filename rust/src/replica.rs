@@ -1,17 +1,18 @@
 //! The replica daemon, as `replica.py` but serving query mode 2 alone: one Reticulum
 //! destination whose Channel messages are client reads and writes and the replica paths
 //! `peek`, `sync`, `forward` and `pushed`, which it also asks other replicas, falling back to
-//! Link requests through Python RNS with feature `reticulum-py`, and tasks for forwarding,
-//! handoff and sync, garbage collection and announcing.
+//! Link requests through Python RNS with feature `reticulum-py`, subscribe and unsubscribe,
+//! pushes of boxes to the Links subscribed to them, and tasks for forwarding, handoff and
+//! sync, garbage collection and announcing.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rand_core::OsRng;
 use reticulum::destination::DestinationName;
-use reticulum::destination::link::{Link, LinkEvent, LinkStatus};
+use reticulum::destination::link::{Link, LinkEvent, LinkId, LinkStatus};
 use reticulum::hash::AddressHash;
 use reticulum::identity::PrivateIdentity;
 use reticulum::iface::tcp_client::TcpClient;
@@ -26,6 +27,7 @@ use crate::channel::{self, Frame, Reassembler};
 use crate::config::{self, Iface};
 use crate::engine::{BRIDGE, Engine, Net};
 use crate::mesh::{self, Mesh};
+use crate::push::{self, Subscriptions};
 use crate::store::{Dst, Store};
 use crate::wire::{self, BoxId, Reply};
 
@@ -41,9 +43,10 @@ const GC_INTERVAL: Duration = Duration::from_secs(3600);
 /// RNS's Link stale time; Reticulum-rs defaults to 10 seconds, shorter than a Python peer's
 /// keepalive on a slow link.
 const LINK_STALE: Duration = Duration::from_secs(720);
-// Announce flags: bridge, serves mode 2, serves the replica paths in mode 2, no Link requests.
+// Announce flags: bridge, serves mode 2, serves the replica paths in mode 2, no Link requests,
+// serves push.
 const BRIDGE_FLAG: u8 = 1;
-const FLAGS: u8 = 2 | 4 | 8;
+const FLAGS: u8 = 2 | 4 | 8 | 16;
 const PATHS_FLAG: u8 = 4;
 const NO_REQUESTS_FLAG: u8 = 8;
 
@@ -77,6 +80,9 @@ pub struct Replica {
     kick: Notify,
     /// Each replica's announce flags.
     flags: StdMutex<HashMap<Dst, u8>>,
+    subs: StdMutex<Subscriptions<LinkId>>,
+    /// Each Link's push queue, drained by a task of its own.
+    pushers: StdMutex<HashMap<LinkId, mpsc::Sender<Vec<u8>>>>,
     #[cfg(feature = "reticulum-py")]
     py: Option<crate::pyfallback::PyLinks>,
 }
@@ -169,7 +175,7 @@ impl Replica {
 
     /// The message's first byte picks the handler, a read or a write query or a replica path,
     /// whose sender is the replica the Link identified as.
-    async fn on_message(&self, msg: &[u8], sender: Option<Dst>) -> Vec<u8> {
+    async fn on_message(&self, msg: &[u8], sender: Option<Dst>, link: &LinkId) -> Vec<u8> {
         let (reach, e, s) = (self.reachable().await, &self.engine, sender.as_ref());
         let body = msg.get(1..).unwrap_or_default();
         let r = match msg.first() {
@@ -179,6 +185,14 @@ impl Replica {
             Some(&channel::SYNC) => e.handle_sync(body, s),
             Some(&channel::FORWARD) => Ok(e.handle_forward(body, &reach, s)),
             Some(&channel::PUSHED) => e.handle_pushed(body),
+            Some(&push::SUBSCRIBE) => Ok(self.subscribe(link, body)),
+            Some(&push::UNSUBSCRIBE) => Ok(match push::decode_ids(body) {
+                Some(ids) => {
+                    self.subs.lock().unwrap().unsubscribe(link, &ids);
+                    vec![wire::SUCCESS]
+                }
+                None => vec![wire::INVALID_PAYLOAD],
+            }),
             _ => Ok(vec![wire::INVALID_PAYLOAD]),
         };
         if matches!(msg.first(), Some(&wire::WRITE | &channel::SYNC | &channel::FORWARD)) {
@@ -190,6 +204,40 @@ impl Replica {
         })
     }
 
+    /// Subscribes the Link, then pushes at once what is already held.
+    fn subscribe(&self, link: &LinkId, body: &[u8]) -> Vec<u8> {
+        let Some((ttl, ids)) = push::decode_subscribe(body) else {
+            return vec![wire::INVALID_PAYLOAD];
+        };
+        let (taken, ttl) = self.subs.lock().unwrap().subscribe(link, ttl, &ids, Instant::now());
+        for b in &ids[..taken as usize] {
+            if matches!(self.engine.store.get(b), Ok(Some(_))) {
+                self.stored(b);
+            }
+        }
+        push::encode_subscribe_reply(taken, ttl)
+    }
+
+    /// Pushes a box just stored to the Links waiting for it.
+    fn stored(&self, box_id: &BoxId) {
+        let links = self.subs.lock().unwrap().take(box_id, Instant::now());
+        if links.is_empty() {
+            return;
+        }
+        let Ok(Some(r)) = self.engine.local(box_id) else {
+            return;
+        };
+        let msg = push::encode_push(box_id, &r);
+        let pushers = self.pushers.lock().unwrap();
+        for l in links {
+            if let Some(tx) = pushers.get(&l)
+                && tx.try_send(msg.clone()).is_err()
+            {
+                log::warn!("pigeonhole: push queue full on a link, push dropped");
+            }
+        }
+    }
+
     /// Mode 2 on one Link: CHANNEL_WORKERS handlers taking queries from a queue of
     /// CHANNEL_QUEUE, and at most CHANNEL_HANDLERS handling at once across the replica. A
     /// query arriving to a full queue is dropped; its client times out and asks again.
@@ -198,6 +246,22 @@ impl Replica {
             return;
         };
         let ch = Arc::new(ch);
+        let link_id = *link.lock().await.id();
+        // Pushes go on a task of their own, as they wait for the Channel window.
+        let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(push::LIMIT);
+        self.pushers.lock().unwrap().insert(link_id, ptx);
+        let (pch, plink) = (ch.clone(), link.clone());
+        tokio::spawn(async move {
+            let mut push_id: u16 = 0;
+            while let Some(msg) = prx.recv().await {
+                if let Some(frames) = channel::split(push_id, &msg) {
+                    let frames: Vec<Frame> =
+                        frames.into_iter().map(|f| Frame { msgtype: channel::PUSH_MSGTYPE, ..f }).collect();
+                    let _ = timeout(mesh::QUERY_TIMEOUT, mesh::send_frames(&pch, &plink, &frames)).await;
+                }
+                push_id = push_id.wrapping_add(1);
+            }
+        });
         let (qtx, qrx) = mpsc::channel::<(u16, Vec<u8>)>(CHANNEL_QUEUE);
         let qrx = Arc::new(Mutex::new(qrx));
         for _ in 0..CHANNEL_WORKERS {
@@ -211,7 +275,7 @@ impl Replica {
                     let sender = id.and_then(|i| r.engine.peer_of(i.as_slice()));
                     let reply = {
                         let _permit = r.handlers.acquire().await;
-                        r.on_message(&q, sender).await
+                        r.on_message(&q, sender, &link_id).await
                     };
                     if let Some(frames) = channel::split(rid, &reply) {
                         let _ = timeout(mesh::QUERY_TIMEOUT, mesh::send_frames(&ch, &link, &frames)).await;
@@ -224,7 +288,7 @@ impl Replica {
         loop {
             tokio::select! {
                 m = rx.recv() => match m {
-                    Ok(f) => {
+                    Ok(f) if f.msgtype == channel::MSGTYPE => {
                         let rid = f.request_id;
                         if let Some(q) = reasm.feed(f)
                             && qtx.try_send((rid, q)).is_err()
@@ -232,15 +296,18 @@ impl Replica {
                             log::warn!("pigeonhole: channel queue full on a link, query dropped");
                         }
                     }
-                    Err(RecvError::Lagged(_)) => {}
-                    Err(RecvError::Closed) => return,
+                    Ok(_) | Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => break,
                 },
                 // shortcut: Reticulum-rs keeps a closed Link's Channel tasks; ours end here.
                 _ = tick.tick() => if link.lock().await.status() == LinkStatus::Closed {
-                    return;
+                    break;
                 },
             }
         }
+        // Ends the push task too.
+        self.pushers.lock().unwrap().remove(&link_id);
+        self.subs.lock().unwrap().drop_link(&link_id);
     }
 }
 
@@ -320,6 +387,8 @@ pub async fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
     )
     .bridging(wire::mixnet_id(&o.mixnet), o.forward_all);
     engine.epoch_seconds = o.epoch_seconds;
+    let (stored_tx, mut stored_rx) = mpsc::unbounded_channel();
+    engine.on_stored = Some(stored_tx);
     if bridge.is_some() && o.epoch_seconds != crate::engine::EPOCH_SECONDS {
         log::warn!(
             "pigeonhole: replica epoch {}s differs from Katzenpost's {}s; bridged boxes expire out of step",
@@ -336,6 +405,8 @@ pub async fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
         handlers: Semaphore::new(CHANNEL_HANDLERS),
         kick: Notify::new(),
         flags: StdMutex::default(),
+        subs: StdMutex::new(Subscriptions::new(push::LIMIT)),
+        pushers: StdMutex::default(),
         #[cfg(feature = "reticulum-py")]
         py,
     });
@@ -368,6 +439,13 @@ pub async fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 log::warn!("pigeonhole: ignoring announce with a changed key for {}", desc.address_hash);
             }
+        }
+    });
+
+    let rr = r.clone();
+    tokio::spawn(async move {
+        while let Some(b) = stored_rx.recv().await {
+            rr.stored(&b);
         }
     });
 

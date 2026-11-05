@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: © 2026 David Stainton
 # SPDX-License-Identifier: AGPL-3.0-only
-"""The replica daemon: one Reticulum destination with request paths `write`
-and `read` for clients and `peek`, `sync`, `forward` and `pushed` for other
-replicas, the same queries and paths as Channel frames (mode 2), which it
-asks other replicas in first, and threads for forwarding,
-handoff, garbage collection and announcing."""
+"""The replica daemon: one Reticulum destination with request paths `write`,
+`read`, `subscribe` and `unsubscribe` for clients and `peek`, `sync`,
+`forward` and `pushed` for other replicas, the same queries and paths as
+Channel frames (mode 2), which it asks other replicas in first, pushes of
+boxes to the Links subscribed to them, and threads for forwarding, handoff,
+garbage collection and announcing."""
 
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from typing import Iterable, Optional
 
 import RNS
 
-from . import APP_NAME, ASPECT, channel, engine, rnsio, wire
+from . import APP_NAME, ASPECT, channel, engine, push, rnsio, wire
 from .bridge import BridgeSocket
 from .store import Store
 
@@ -27,6 +28,8 @@ from .store import Store
 CHANNEL_WORKERS = 2
 CHANNEL_QUEUE = 16
 CHANNEL_HANDLERS = 32
+# Announce flags: bridge, serves mode 2, serves the replica paths in mode 2, serves push.
+PUSH_FLAG = 16
 
 class Replica:
     def __init__(
@@ -63,6 +66,8 @@ class Replica:
         self.destination.register_request_handler("sync", response_generator=self._on_sync, allow=RNS.Destination.ALLOW_ALL)
         self.destination.register_request_handler("forward", response_generator=self._on_forward, allow=RNS.Destination.ALLOW_ALL)
         self.destination.register_request_handler("pushed", response_generator=self._on_pushed, allow=RNS.Destination.ALLOW_ALL)
+        self.destination.register_request_handler("subscribe", response_generator=self._on_subscribe, allow=RNS.Destination.ALLOW_ALL)
+        self.destination.register_request_handler("unsubscribe", response_generator=self._on_unsubscribe, allow=RNS.Destination.ALLOW_ALL)
         self.destination.set_link_established_callback(self._on_link)
 
         self.bridge = BridgeSocket(bridge_socket) if bridge_socket else None
@@ -79,6 +84,10 @@ class Replica:
             epoch_seconds=epoch_period * replica_epoch_epochs,
             log=lambda m: RNS.log(m, RNS.LOG_NOTICE),
         )
+        self.subs = push.Subscriptions()
+        # Each Link's push queue, by link id, drained by a thread of its own.
+        self._pushers: dict = {}
+        self.engine.on_stored = self._stored
         if self.bridge is not None and self.engine.epoch_seconds != engine.EPOCH_SECONDS:
             RNS.log("pigeonhole: replica epoch %ds differs from Katzenpost's %ds; bridged boxes expire out of step"
                     % (self.engine.epoch_seconds, engine.EPOCH_SECONDS), RNS.LOG_WARNING)
@@ -105,7 +114,7 @@ class Replica:
             RNS.log("pigeonhole: ignoring announce with a changed key for %s" % RNS.prettyhexrep(dest), RNS.LOG_WARNING)
 
     def announce(self) -> None:
-        self.destination.announce(app_data=bytes([(1 if self.bridge else 0) | 2 | 4]) + self.engine.mixnet)
+        self.destination.announce(app_data=bytes([(1 if self.bridge else 0) | 2 | 4 | PUSH_FLAG]) + self.engine.mixnet)
 
     # ---- request handlers, called on Reticulum's threads ----
 
@@ -139,6 +148,50 @@ class Replica:
     def _on_read(self, path, data, request_id, link_id, remote_identity, requested_at):
         return self.engine.handle_read(bytes(data), self._reachable(), self.links.peek, self._bridge_read())
 
+    def _on_subscribe(self, path, data, request_id, link_id, remote_identity, requested_at):
+        return self._subscribe(bytes(link_id), bytes(data))
+
+    def _on_unsubscribe(self, path, data, request_id, link_id, remote_identity, requested_at):
+        return self._unsubscribe(bytes(link_id), bytes(data))
+
+    def _subscribe(self, link_id: bytes, data: bytes) -> bytes:
+        """Subscribes the Link, then pushes at once what is already held."""
+        try:
+            ttl, ids = push.decode_subscribe(data)
+        except wire.WireError:
+            return wire.encode_reply(wire.INVALID_PAYLOAD)
+        taken, ttl = self.subs.subscribe(link_id, ttl, ids)
+        for box_id in ids[:taken]:
+            if self.engine.store.get(box_id) is not None:
+                self._stored(box_id)
+        return push.encode_subscribe_reply(taken, ttl)
+
+    def _unsubscribe(self, link_id: bytes, data: bytes) -> bytes:
+        try:
+            self.subs.unsubscribe(link_id, push.decode_ids(data))
+        except wire.WireError:
+            return wire.encode_reply(wire.INVALID_PAYLOAD)
+        return wire.encode_reply(wire.SUCCESS)
+
+    def _stored(self, box_id: bytes) -> None:
+        links = self.subs.take(box_id)
+        r = self.engine.local(box_id) if links else None
+        if r is None:
+            return
+        msg = push.encode_push(box_id, r)
+        for link_id in links:
+            q = self._pushers.get(link_id)
+            if q is None:
+                continue
+            try:
+                q.put_nowait(msg)
+            except queue.Full:
+                RNS.log("pigeonhole: push queue full on a link, push dropped", RNS.LOG_WARNING)
+
+    def _on_closed(self, link) -> None:
+        self.subs.drop(bytes(link.link_id))
+        self._pushers.pop(bytes(link.link_id), None)
+
     def _on_link(self, link) -> None:
         # Handlers may block on peeks and on the reply's Channel window, so they run on worker
         # threads, not Reticulum's: CHANNEL_WORKERS per Link, taking queries from a queue of
@@ -163,9 +216,28 @@ class Replica:
                 with self._channel_handlers:
                     self._on_frame_query(ep, rid, data)
 
-        channel.Endpoint(link, accept)
+        ep = channel.Endpoint(link, accept)
         for _ in range(CHANNEL_WORKERS):
             threading.Thread(target=work, daemon=True).start()
+
+        # Pushes go on a thread of their own, as they wait for the Channel window.
+        pushes: "queue.Queue" = queue.Queue(maxsize=push.LIMIT)
+        self._pushers[bytes(link.link_id)] = pushes
+        link.set_link_closed_callback(self._on_closed)
+
+        def send_pushes():
+            push_id = 0
+            while not self._stop.is_set():
+                try:
+                    msg = pushes.get(timeout=1)
+                except queue.Empty:
+                    if link.status == RNS.Link.CLOSED:
+                        return
+                    continue
+                ep.send(push_id, msg, cls=channel.PushFrame)
+                push_id = (push_id + 1) & 0xFFFF
+
+        threading.Thread(target=send_pushes, daemon=True).start()
 
     def _on_frame_query(self, ep: channel.Endpoint, request_id: int, data: bytes) -> None:
         """Mode 2: the message's first byte picks the handler, a read or a write query or
@@ -183,6 +255,10 @@ class Replica:
             reply = self.engine.handle_forward(data[1:], self._reachable(), sender)
         elif op == bytes([channel.PATH_OPS["pushed"]]):
             reply = self.engine.handle_pushed(data[1:])
+        elif op == bytes([push.SUBSCRIBE]):
+            reply = self._subscribe(bytes(ep.link.link_id), data[1:])
+        elif op == bytes([push.UNSUBSCRIBE]):
+            reply = self._unsubscribe(bytes(ep.link.link_id), data[1:])
         else:
             reply = wire.encode_reply(wire.INVALID_PAYLOAD)
         if op in (bytes([wire.WRITE]), bytes([channel.PATH_OPS["sync"]]), bytes([channel.PATH_OPS["forward"]])):

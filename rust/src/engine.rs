@@ -94,6 +94,8 @@ pub struct Engine {
     pub clock: Mutex<Option<f64>>,
     /// Seconds in a replica epoch.
     pub epoch_seconds: f64,
+    /// Gets the Box ID of each box stored, or stored again, for push.
+    pub on_stored: Option<tokio::sync::mpsc::UnboundedSender<BoxId>>,
 }
 
 type Result<T> = rusqlite::Result<T>;
@@ -119,6 +121,7 @@ impl Engine {
             synced: Mutex::default(),
             clock: Mutex::new(None),
             epoch_seconds: EPOCH_SECONDS,
+            on_stored: None,
         }
     }
 
@@ -240,7 +243,17 @@ impl Engine {
             return Ok(code);
         }
         let dsts = self.forwards(reachable, sender, origin, sender.is_none());
-        self.store.put(box_id, signature, ciphertext, self.epoch(), &dsts, origin)
+        self.put(box_id, signature, ciphertext, &dsts, origin)
+    }
+
+    fn put(&self, box_id: &BoxId, sig: &[u8], ct: &[u8], dsts: &[Dst], origin: &[u8]) -> Result<u8> {
+        let code = self.store.put(box_id, sig, ct, self.epoch(), dsts, origin)?;
+        if code == wire::SUCCESS
+            && let Some(tx) = &self.on_stored
+        {
+            let _ = tx.send(*box_id);
+        }
+        Ok(code)
     }
 
     pub fn handle_write(&self, data: &[u8], reachable: &[Dst], sender: Option<&Dst>) -> Vec<u8> {
@@ -283,7 +296,7 @@ impl Engine {
 
     // ---- reads ----
 
-    fn local(&self, box_id: &BoxId) -> Result<Option<Reply>> {
+    pub fn local(&self, box_id: &BoxId) -> Result<Option<Reply>> {
         Ok(self.store.get(box_id)?.map(|b| {
             if b.is_tombstone() {
                 Reply::code(wire::TOMBSTONE)
@@ -362,7 +375,7 @@ impl Engine {
             let q = Query::Write { box_id: *box_id, signature: sig.clone(), ciphertext: ct.clone() };
             if self.verify(&q) == wire::SUCCESS {
                 let dsts = self.forwards(reachable, None, origin, false);
-                self.store.put(box_id, sig, ct, self.epoch(), &dsts, origin)?;
+                self.put(box_id, sig, ct, &dsts, origin)?;
             }
         }
         Ok(())
@@ -694,6 +707,43 @@ mod tests {
         bad[0] ^= 1;
         assert_eq!(e.handle_write(&wire::encode_write(&b, &bad, &c), &[], None), [wire::INVALID_SIGNATURE]);
         assert_eq!(e.handle_write(&wire::encode_write(&b, &s, &c[1..]), &[], None), [wire::INVALID_PAYLOAD]);
+    }
+
+    /// Every box stored is reported for push: a client's write, a replica's forward, a bridge
+    /// pull, a tombstone; a refused write is not.
+    #[tokio::test]
+    async fn stored_boxes_are_reported_for_push() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (d(b"me"), d(b"r2"));
+        let ea = Arc::new(engine(dir.path(), "a", a, &[b], false));
+        let mut eb = engine(dir.path(), "b", b, &[a], true);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        eb.on_stored = Some(tx);
+        let eb = Arc::new(eb);
+        let mesh = Mesh::default();
+        mesh.engines.lock().unwrap().extend([(a.to_vec(), ea.clone()), (b.to_vec(), eb.clone())]);
+        let mx = MixnetRef::default();
+        mesh.mixnets.lock().unwrap().insert(b.to_vec(), mx.clone());
+        let (b1, s1, c1) = seal(false);
+        assert_eq!(eb.handle_write(&wire::encode_write(&b1, &s1, &c1), &[], None), [wire::SUCCESS]);
+        assert_eq!(rx.try_recv().ok(), Some(b1));
+        // Arriving by replication.
+        let (b2, s2, c2) = seal(false);
+        ea.handle_write(&wire::encode_write(&b2, &s2, &c2), &[b.to_vec()], None);
+        assert_eq!(ea.forward_due(&[b.to_vec()], &mesh.at(&a)).await.unwrap(), 1);
+        assert_eq!(rx.try_recv().ok(), Some(b2));
+        // Pulled from the bridge's mixnet.
+        let (b3, s3, c3) = seal(false);
+        mx.lock().unwrap().boxes.insert(b3, (s3, c3));
+        eb.handle_peek(&wire::encode_read(&b3), &[], &mesh.at(&b)).await.unwrap();
+        assert_eq!(rx.try_recv().ok(), Some(b3));
+        let (t, ts, _) = seal(true);
+        eb.handle_write(&wire::encode_write(&t, &ts, b""), &[], None);
+        assert_eq!(rx.try_recv().ok(), Some(t));
+        let mut bad = s1.clone();
+        bad[0] ^= 1;
+        eb.handle_write(&wire::encode_write(&b1, &bad, &c1), &[], None);
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

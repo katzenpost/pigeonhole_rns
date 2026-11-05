@@ -108,6 +108,8 @@ class Engine:
         self.now = now
         self.epoch_seconds = epoch_seconds
         self.peers: Dict[bytes, Peer] = {self_dest: Peer(self_identity, is_bridge, mixnet=self.mixnet)}
+        # Called with the Box ID of each box stored, or stored again, for push.
+        self.on_stored: Optional[Callable[[bytes], None]] = None
 
     # ---- membership ----
 
@@ -175,7 +177,13 @@ class Engine:
         if code != wire.SUCCESS:
             return code
         dsts = self.forwards(q.box_id, reachable, sender, origin, client=sender is None)
-        return self.store.put(q.box_id, q.signature, q.ciphertext, self.epoch(), dsts, origin)
+        return self._put(q.box_id, q.signature, q.ciphertext, dsts, origin)
+
+    def _put(self, box_id: bytes, signature: bytes, payload: bytes, dsts, origin: bytes) -> int:
+        code = self.store.put(box_id, signature, payload, self.epoch(), dsts, origin)
+        if code == wire.SUCCESS and self.on_stored is not None:
+            self.on_stored(box_id)
+        return code
 
     def handle_forward(self, data: bytes, reachable: Iterable[bytes], sender: Optional[bytes]) -> bytes:
         """A write prefixed with the mixnet the box came from. The origin
@@ -270,7 +278,7 @@ class Engine:
             q = wire.Query(wire.WRITE, box_id, r.signature, r.ciphertext or b"")
             if self.verify(q) == wire.SUCCESS:
                 dsts = self.forwards(box_id, reachable, origin=origin)
-                self.store.put(box_id, r.signature, r.ciphertext or b"", self.epoch(), dsts, origin)
+                self._put(box_id, r.signature, r.ciphertext or b"", dsts, origin)
 
     # ---- forwarding and handoff ----
 

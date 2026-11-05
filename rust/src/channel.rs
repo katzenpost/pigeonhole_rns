@@ -4,7 +4,7 @@
 //! Every message is one [`Frame`] of MSGTYPE [`MSGTYPE`]: a request id (u16, big endian), the
 //! piece index (u8), the piece count (u8), then that piece of the query or reply bytes. A
 //! message is cut into at most 255 pieces of at most [`PIECE`] bytes. A reply carries its
-//! query's request id.
+//! query's request id. A push is framed the same under MSGTYPE [`PUSH_MSGTYPE`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
@@ -13,6 +13,7 @@ use reticulum::channel::Message;
 use reticulum::error::RnsError;
 
 pub const MSGTYPE: u16 = 0x5048;
+pub const PUSH_MSGTYPE: u16 = 0x5049;
 /// A message's first byte: a read or a write query, as they begin, or a replica path followed
 /// by that path's request bytes.
 pub const PEEK: u8 = 2;
@@ -28,6 +29,7 @@ const REASSEMBLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
+    pub msgtype: u16,
     pub request_id: u16,
     pub index: u8,
     pub count: u8,
@@ -36,10 +38,10 @@ pub struct Frame {
 
 impl Message for Frame {
     fn unpack(b: &[u8], message_type: u16) -> Result<Self, RnsError> {
-        if message_type != MSGTYPE || b.len() < HEADER {
+        if !matches!(message_type, MSGTYPE | PUSH_MSGTYPE) || b.len() < HEADER {
             return Err(RnsError::ChannelError);
         }
-        Ok(Frame { request_id: u16::from_be_bytes([b[0], b[1]]), index: b[2], count: b[3], data: b[HEADER..].to_vec() })
+        Ok(Frame { msgtype: message_type, request_id: u16::from_be_bytes([b[0], b[1]]), index: b[2], count: b[3], data: b[HEADER..].to_vec() })
     }
 
     fn pack(&self) -> Vec<u8> {
@@ -47,7 +49,7 @@ impl Message for Frame {
     }
 
     fn message_type(&self) -> u16 {
-        MSGTYPE
+        self.msgtype
     }
 }
 
@@ -58,6 +60,7 @@ pub fn split(request_id: u16, data: &[u8]) -> Option<Vec<Frame>> {
     (count <= MAX_PIECES).then(|| {
         (0..count)
             .map(|i| Frame {
+                msgtype: MSGTYPE,
                 request_id,
                 index: i as u8,
                 count: count as u8,
@@ -117,7 +120,7 @@ mod tests {
         assert!(split(1, &vec![0; 255 * PIECE + 1]).is_none());
         assert_eq!(split(1, &[]).unwrap()[0].count, 1);
         assert_eq!(PIECE, 421);
-        let f = Frame { request_id: 0x0102, index: 3, count: 4, data: vec![9] };
+        let f = Frame { msgtype: MSGTYPE, request_id: 0x0102, index: 3, count: 4, data: vec![9] };
         assert_eq!(f.pack(), [1, 2, 3, 4, 9]);
         assert_eq!(Frame::unpack(&f.pack(), MSGTYPE).unwrap(), f);
     }
@@ -125,8 +128,8 @@ mod tests {
     #[test]
     fn mismatched_count_drops_request() {
         let mut r = Reassembler::default();
-        assert_eq!(r.feed(Frame { request_id: 1, index: 0, count: 2, data: vec![1] }), None);
-        assert_eq!(r.feed(Frame { request_id: 1, index: 1, count: 3, data: vec![2] }), None);
-        assert_eq!(r.feed(Frame { request_id: 1, index: 1, count: 2, data: vec![2] }), None);
+        assert_eq!(r.feed(Frame { msgtype: MSGTYPE, request_id: 1, index: 0, count: 2, data: vec![1] }), None);
+        assert_eq!(r.feed(Frame { msgtype: MSGTYPE, request_id: 1, index: 1, count: 3, data: vec![2] }), None);
+        assert_eq!(r.feed(Frame { msgtype: MSGTYPE, request_id: 1, index: 1, count: 2, data: vec![2] }), None);
     }
 }
