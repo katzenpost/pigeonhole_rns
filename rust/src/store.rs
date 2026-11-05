@@ -1,6 +1,5 @@
 //! The SQLite store of `store.py`, same schema and file: boxes, the forward queue and the
-//! acknowledgements that let a stand-in drop its copy, so that storing a box and enqueueing its
-//! forwards is one commit.
+//! acknowledgements, so that storing a box and enqueueing its forwards is one commit.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -119,13 +118,6 @@ impl Store {
         Ok(wire::SUCCESS)
     }
 
-    pub fn drop_box(&self, box_id: &BoxId) -> Result<()> {
-        let db = self.db();
-        db.execute("DELETE FROM boxes WHERE box_id = ? AND length(payload) > 0", [&box_id[..]])?;
-        db.execute("DELETE FROM acks WHERE box_id = ?", [&box_id[..]])?;
-        Ok(())
-    }
-
     pub fn box_ids(&self) -> Result<Vec<BoxId>> {
         let db = self.db();
         let mut s = db.prepare("SELECT box_id FROM boxes")?;
@@ -223,8 +215,6 @@ mod tests {
         assert!(s.get(&b).unwrap().unwrap().is_tombstone());
         assert!(s.acked(&b).unwrap().is_empty());
         assert_eq!(s.put(&b, &[1; 64], b"ct", 7, &[], b"").unwrap(), wire::ALREADY_EXISTS);
-        s.drop_box(&b).unwrap();
-        assert!(s.get(&b).unwrap().is_some(), "a tombstone is never dropped");
     }
 
     #[test]

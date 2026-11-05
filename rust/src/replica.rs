@@ -24,7 +24,7 @@ use tokio::time::{interval, sleep, timeout};
 use crate::bridge::Bridge;
 use crate::channel::{self, Frame, Reassembler};
 use crate::config::{self, Iface};
-use crate::engine::{BRIDGE, Engine, Mode, Net};
+use crate::engine::{BRIDGE, Engine, Net};
 use crate::mesh::{self, Mesh};
 use crate::store::{Dst, Store};
 use crate::wire::{self, BoxId, Reply};
@@ -54,7 +54,6 @@ pub struct Options {
     pub mixnet: String,
     pub forward_all: bool,
     pub announce_interval: Duration,
-    pub mode: Mode,
     /// With feature `reticulum-py`: the config directory of the Python Reticulum instance that
     /// reaches replicas not serving the replica paths in mode 2.
     pub py_config: Option<PathBuf>,
@@ -310,7 +309,6 @@ pub async fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
         me.address_hash().as_slice().try_into().unwrap(),
         ct_size,
         bridge.is_some(),
-        o.mode,
     )
     .bridging(wire::mixnet_id(&o.mixnet), o.forward_all);
     let r = Arc::new(Replica {
@@ -399,7 +397,7 @@ pub async fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             sleep(HANDOFF_INTERVAL).await;
             let reach = rr.reachable().await;
-            if let Err(e) = rr.engine.handoff(&reach) {
+            if let Err(e) = rr.engine.handoff() {
                 log::error!("pigeonhole: handoff: {e}");
             }
             if let Err(e) = rr.engine.sync(&reach, &*rr).await {

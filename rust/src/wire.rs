@@ -226,7 +226,6 @@ mod tests {
                 [2; 16],
                 size,
                 false,
-                crate::engine::Mode::Open,
             );
             let q = Query::Write {
                 box_id: hx(v, "box_id").try_into().unwrap(),

@@ -52,10 +52,6 @@ enum Cmd {
         forward: String,
         #[arg(long, default_value_t = 600.0)]
         announce_interval: f64,
-        /// open: every replica stores every box; closed: boxes sharded over two owners each,
-        /// without the authentication a closed mesh will need
-        #[arg(long, default_value = "open", value_parser = ["open", "closed"])]
-        mesh_mode: String,
         /// The config directory of a Python Reticulum instance, to reach replicas that do not
         /// serve the replica paths in mode 2 with Link requests (feature reticulum-py)
         #[cfg(feature = "reticulum-py")]
@@ -74,9 +70,9 @@ async fn main() {
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(filter)).init();
     #[cfg(feature = "reticulum-py")]
-    let Cmd::Replica { storage, bridge_socket, mixnet, forward, announce_interval, mesh_mode, py_config } = cli.cmd;
+    let Cmd::Replica { storage, bridge_socket, mixnet, forward, announce_interval, py_config } = cli.cmd;
     #[cfg(not(feature = "reticulum-py"))]
-    let (Cmd::Replica { storage, bridge_socket, mixnet, forward, announce_interval, mesh_mode }, py_config) = (cli.cmd, None);
+    let (Cmd::Replica { storage, bridge_socket, mixnet, forward, announce_interval }, py_config) = (cli.cmd, None);
     let config_dir = cli
         .config
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".reticulum"));
@@ -88,7 +84,6 @@ async fn main() {
         mixnet,
         forward_all: forward == "all",
         announce_interval: Duration::from_secs_f64(announce_interval),
-        mode: if mesh_mode == "closed" { engine::Mode::Closed } else { engine::Mode::Open },
         py_config,
     };
     if let Err(e) = replica::run(o).await {
