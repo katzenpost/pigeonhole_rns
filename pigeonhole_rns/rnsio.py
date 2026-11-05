@@ -15,9 +15,10 @@ from . import APP_NAME, ASPECT, ASPECT_FILTER, channel, wire
 
 class AnnounceHandler:
     """Feeds replica announces to a callback (dest_hash, identity_hash, bridge,
-    channel, mixnet). App data is a flags byte, bit 0 bridge and bit 1 serves
-    query mode 2, then for a bridge the id of its mixnet; a bridge announcing
-    none serves the mixnet named by the empty string."""
+    channel, mixnet, flags). App data is a flags byte, bit 0 bridge,
+    bit 1 serves query mode 2, bit 2 serves the replica paths in mode 2 too and
+    bit 3 serves no Link requests, then for a bridge the id of its mixnet; a
+    bridge announcing none serves the mixnet named by the empty string."""
 
     aspect_filter = ASPECT_FILTER
 
@@ -31,7 +32,7 @@ class AnnounceHandler:
             mixnet = bytes(app_data[1 : 1 + wire.MIXNET_ID_SIZE])
             if len(mixnet) != wire.MIXNET_ID_SIZE:
                 mixnet = wire.mixnet_id("")
-        self.on_replica(bytes(destination_hash), bytes(announced_identity.hash), bool(flags & 1), bool(flags & 2), mixnet)
+        self.on_replica(bytes(destination_hash), bytes(announced_identity.hash), bool(flags & 1), bool(flags & 2), mixnet, flags)
 
 
 def reachable(dests) -> list:
@@ -49,7 +50,8 @@ class Links:
     per Link at once, under a replica's per Link queue in mode 2; the Link
     API carries payloads over the MDU as Resources by itself."""
 
-    def __init__(self, establish_timeout: float = 20.0, request_timeout: float = 60.0, identity: Optional[RNS.Identity] = None, window: int = 8):
+    def __init__(self, establish_timeout: float = 20.0, request_timeout: float = 60.0, identity: Optional[RNS.Identity] = None, window: int = 8,
+                 prefer_channel: bool = False):
         self.identity = identity
         self.window = window
         self.establish_timeout = establish_timeout
@@ -61,6 +63,9 @@ class Links:
         self._endpoints: Dict[bytes, channel.Endpoint] = {}
         self._replies: Dict[int, list] = {}
         self._next_id = 0
+        # Each replica's announce flags, and whether request() asks in mode 2 those serving it.
+        self.flags: Dict[bytes, int] = {}
+        self.prefer_channel = prefer_channel
 
     def _lock(self, dest: bytes) -> threading.Lock:
         with self._mu:
@@ -99,7 +104,25 @@ class Links:
         return link
 
     def request(self, dest: bytes, path: str, data: bytes) -> Optional[bytes]:
-        """Returns the reply bytes, or None when the replica did not answer."""
+        """Returns the reply bytes, or None when the replica did not answer. Asks in mode 2
+        first when preferring it and the replica serves the path there (announce bit 1 for a
+        read or write, bit 2 for a replica path), and as a Link request when mode 2 fails;
+        a replica serving no Link requests (bit 3) only in mode 2."""
+        flags = self.flags.get(dest, 0)
+        op = channel.PATH_OPS.get(path)
+        if flags & 8 or (self.prefer_channel and flags & (2 if op is None else 4)):
+            raw = self.channel_request(dest, data if op is None else bytes([op]) + data)
+            # No Link at all is no reason to try a request, which needs one too.
+            if raw is not None or flags & 8 or not self._active(dest):
+                return raw
+        return self._request(dest, path, data)
+
+    def _active(self, dest: bytes) -> bool:
+        with self._mu:
+            link = self._links.get(dest)
+        return link is not None and link.status == RNS.Link.ACTIVE
+
+    def _request(self, dest: bytes, path: str, data: bytes) -> Optional[bytes]:
         with self._window(dest):
             link = self._open(dest)
             if link is None:

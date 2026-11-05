@@ -6,7 +6,11 @@ Reticulum stacks without Link requests or Resources.
 Every message is one Frame of MSGTYPE 0x5048: a request id (u16, big
 endian), the piece index (u8), the piece count (u8), then that piece of the
 query or reply bytes of wire.py. A message is cut into at most 255 pieces of
-at most Channel MDU minus 4 bytes. A reply carries its query's request id."""
+at most Channel MDU minus 4 bytes. A reply carries its query's request id.
+
+A message's first byte picks what it asks: 0 and 1 are a read and a write
+query, as they begin; PATH_OPS are the replica to replica paths, followed by
+that path's request bytes, and answered with that path's response bytes."""
 
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ from RNS.Channel import MessageBase
 MSGTYPE = 0x5048
 HEADER = struct.Struct(">HBB")
 MAX_PIECES = 255
+PATH_OPS = {"peek": 2, "sync": 3, "forward": 4, "pushed": 5}
 REASSEMBLY_TIMEOUT = 60.0
 
 

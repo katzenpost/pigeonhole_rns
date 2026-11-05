@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """The replica daemon: one Reticulum destination with request paths `write`
 and `read` for clients and `peek`, `sync`, `forward` and `pushed` for other
-replicas, the same
-client queries as Channel frames (mode 2), and threads for forwarding,
+replicas, the same queries and paths as Channel frames (mode 2), which it
+asks other replicas in first, and threads for forwarding,
 handoff, garbage collection and announcing."""
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ class Replica:
             forward=forward,
         )
         # Links identify, so a replica can tell a forward's sender and not send the box back.
-        self.links = rnsio.Links(identity=self.identity)
+        self.links = rnsio.Links(identity=self.identity, prefer_channel=True)
         self.announce_interval = announce_interval
         self.forward_interval = forward_interval
         self.handoff_interval = handoff_interval
@@ -94,16 +94,17 @@ class Replica:
 
     # ---- announces ----
 
-    def _on_announce(self, dest: bytes, identity_hash: bytes, bridge: bool, _channel: bool = False, mixnet: bytes = b"") -> None:
+    def _on_announce(self, dest: bytes, identity_hash: bytes, bridge: bool, _channel: bool = False, mixnet: bytes = b"", flags: int = 0) -> None:
         if dest == self.engine.self_dest:
             return
         if self.engine.heard(dest, identity_hash, bridge, mixnet):
+            self.links.flags[dest] = flags
             RNS.log("pigeonhole: replica %s%s" % (RNS.prettyhexrep(dest), " (bridge)" if bridge else ""), RNS.LOG_DEBUG)
         else:
             RNS.log("pigeonhole: ignoring announce with a changed key for %s" % RNS.prettyhexrep(dest), RNS.LOG_WARNING)
 
     def announce(self) -> None:
-        self.destination.announce(app_data=bytes([(1 if self.bridge else 0) | 2]) + self.engine.mixnet)
+        self.destination.announce(app_data=bytes([(1 if self.bridge else 0) | 2 | 4]) + self.engine.mixnet)
 
     # ---- request handlers, called on Reticulum's threads ----
 
@@ -166,14 +167,25 @@ class Replica:
             threading.Thread(target=work, daemon=True).start()
 
     def _on_frame_query(self, ep: channel.Endpoint, request_id: int, data: bytes) -> None:
-        """Mode 2: the query's op byte picks the handler; peek stays request only."""
-        if data[:1] == bytes([wire.READ]):
+        """Mode 2: the message's first byte picks the handler, a read or a write query or
+        a replica path, whose sender is the replica the Link identified as."""
+        op, sender = data[:1], self._sender(ep.link.get_remote_identity())
+        if op == bytes([wire.READ]):
             reply = self.engine.handle_read(data, self._reachable(), self.links.peek, self._bridge_read())
-        elif data[:1] == bytes([wire.WRITE]):
-            reply = self.engine.handle_write(data, self._reachable())
-            self._kick.set()
+        elif op == bytes([wire.WRITE]):
+            reply = self.engine.handle_write(data, self._reachable(), sender)
+        elif op == bytes([channel.PATH_OPS["peek"]]):
+            reply = self.engine.handle_peek(data[1:], self._bridge_read(), self._reachable())
+        elif op == bytes([channel.PATH_OPS["sync"]]):
+            reply = self.engine.handle_sync(data[1:], sender)
+        elif op == bytes([channel.PATH_OPS["forward"]]):
+            reply = self.engine.handle_forward(data[1:], self._reachable(), sender)
+        elif op == bytes([channel.PATH_OPS["pushed"]]):
+            reply = self.engine.handle_pushed(data[1:])
         else:
             reply = wire.encode_reply(wire.INVALID_PAYLOAD)
+        if op in (bytes([wire.WRITE]), bytes([channel.PATH_OPS["sync"]]), bytes([channel.PATH_OPS["forward"]])):
+            self._kick.set()
         ep.send(request_id, reply)
 
     def _bridge_read(self):
