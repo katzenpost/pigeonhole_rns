@@ -87,6 +87,8 @@ class Replica:
         self.forward_interval = forward_interval
         self.handoff_interval = handoff_interval
         self._stop = threading.Event()
+        # Set when a write or sync may have queued forwards, so they go now and not on the next tick.
+        self._kick = threading.Event()
         self._channel_handlers = threading.BoundedSemaphore(CHANNEL_HANDLERS)
         RNS.Transport.register_announce_handler(rnsio.AnnounceHandler(self._on_announce))
 
@@ -112,10 +114,14 @@ class Replica:
         return None if remote_identity is None else self.engine.peer_of(bytes(remote_identity.hash))
 
     def _on_write(self, path, data, request_id, link_id, remote_identity, requested_at):
-        return self.engine.handle_write(bytes(data), self._reachable(), self._sender(remote_identity))
+        reply = self.engine.handle_write(bytes(data), self._reachable(), self._sender(remote_identity))
+        self._kick.set()
+        return reply
 
     def _on_sync(self, path, data, request_id, link_id, remote_identity, requested_at):
-        return self.engine.handle_sync(bytes(data), self._sender(remote_identity))
+        reply = self.engine.handle_sync(bytes(data), self._sender(remote_identity))
+        self._kick.set()
+        return reply
 
     def _on_forward(self, path, data, request_id, link_id, remote_identity, requested_at):
         return self.engine.handle_forward(bytes(data), self._reachable(), self._sender(remote_identity))
@@ -163,6 +169,7 @@ class Replica:
             reply = self.engine.handle_read(data, self._reachable(), self.links.peek, self._bridge_read())
         elif data[:1] == bytes([wire.WRITE]):
             reply = self.engine.handle_write(data, self._reachable())
+            self._kick.set()
         else:
             reply = wire.encode_reply(wire.INVALID_PAYLOAD)
         ep.send(request_id, reply)
@@ -184,7 +191,11 @@ class Replica:
         return None if raw is None else raw == b"\x01"
 
     def _forward_loop(self) -> None:
-        while not self._stop.wait(self.forward_interval):
+        while True:
+            self._kick.wait(self.forward_interval)
+            self._kick.clear()
+            if self._stop.is_set():
+                return
             try:
                 self.engine.forward_due(self._reachable(), self._deliver, self._pushed)
             except Exception as e:
@@ -219,6 +230,7 @@ class Replica:
 
     def stop(self) -> None:
         self._stop.set()
+        self._kick.set()
         self.links.close()
         if self.bridge is not None:
             self.bridge.close()
