@@ -395,6 +395,7 @@ pub async fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
         _ = tokio::signal::ctrl_c() => {}
         _ = term.recv() => {}
     }
-    r.mesh.close_all().await;
+    // A Link being opened holds its slot up to 20 seconds; shutdown does not wait for it.
+    let _ = timeout(Duration::from_secs(2), r.mesh.close_all()).await;
     Ok(())
 }
