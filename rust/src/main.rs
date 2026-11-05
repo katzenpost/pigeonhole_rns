@@ -52,6 +52,19 @@ enum Cmd {
         forward: String,
         #[arg(long, default_value_t = 600.0)]
         announce_interval: f64,
+        /// Seconds in an epoch, Katzenpost's 20 minutes by default
+        #[arg(long, default_value_t = engine::EPOCH_PERIOD)]
+        epoch_period: f64,
+        /// Epochs in a replica epoch, a week by default; boxes are kept for the current and
+        /// previous replica epoch
+        #[arg(long, default_value_t = engine::REPLICA_EPOCH_EPOCHS)]
+        replica_epoch_epochs: u32,
+        /// Most MiB the box store may take on disk; 0 for no limit
+        #[arg(long, default_value_t = 0)]
+        max_storage_mib: u64,
+        /// MiB to leave free on the storage filesystem; 0 for none
+        #[arg(long, default_value_t = 500)]
+        min_free_storage_mib: u64,
         /// The config directory of a Python Reticulum instance, to reach replicas that do not
         /// serve the replica paths in mode 2 with Link requests (feature reticulum-py)
         #[cfg(feature = "reticulum-py")]
@@ -70,9 +83,9 @@ async fn main() {
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(filter)).init();
     #[cfg(feature = "reticulum-py")]
-    let Cmd::Replica { storage, bridge_socket, mixnet, forward, announce_interval, py_config } = cli.cmd;
+    let Cmd::Replica { storage, bridge_socket, mixnet, forward, announce_interval, epoch_period, replica_epoch_epochs, max_storage_mib, min_free_storage_mib, py_config } = cli.cmd;
     #[cfg(not(feature = "reticulum-py"))]
-    let (Cmd::Replica { storage, bridge_socket, mixnet, forward, announce_interval }, py_config) = (cli.cmd, None);
+    let (Cmd::Replica { storage, bridge_socket, mixnet, forward, announce_interval, epoch_period, replica_epoch_epochs, max_storage_mib, min_free_storage_mib }, py_config) = (cli.cmd, None);
     let config_dir = cli
         .config
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".reticulum"));
@@ -84,6 +97,9 @@ async fn main() {
         mixnet,
         forward_all: forward == "all",
         announce_interval: Duration::from_secs_f64(announce_interval),
+        epoch_seconds: epoch_period * replica_epoch_epochs as f64,
+        max_storage_bytes: max_storage_mib << 20,
+        min_free_storage_bytes: min_free_storage_mib << 20,
         py_config,
     };
     if let Err(e) = replica::run(o).await {

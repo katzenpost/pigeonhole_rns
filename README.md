@@ -177,10 +177,11 @@ this.
 `rust/` is the same replica in Rust on
 [Reticulum-rs](https://github.com/BeechatNetworkSystemsLtd/Reticulum-rs), at
 the revision `katzenpost/pigeonhole_protocols` uses, with BACAP from the Rust
-`hpqc`. It keeps the store (the same SQLite file), open and closed mesh
-modes, sync, the bridge and its rules, the identity file and the command
-line, and reads the TCP and UDP interfaces and `enable_transport` of a
-Reticulum config file. Reticulum-rs has Links and Channel but no Link
+`hpqc`. It keeps the store (the same SQLite file, with the same replica
+epochs, GC and storage limits and their options), open mode and sync, the
+bridge and its rules, the identity file and the command line, and reads the
+TCP and UDP interfaces of a Reticulum config file. It has no closed mode.
+Reticulum-rs has Links and Channel but no Link
 requests or Resources, so it speaks mode 2 alone, to clients and replicas,
 and announces bits 1, 2 and 3; Python replicas ask it in mode 2.
 
@@ -203,8 +204,9 @@ Resources through Python RNS, embedded, for replicas that do not announce bit
     rust/target/release/replica_rns-rs --config ~/.reticulum replica --storage ~/pigeonhole --py-config ~/.reticulum-py
 
 `--py-config` is the config directory of the Python Reticulum instance, with
-interfaces of its own, such as a TCP client of this replica's listener; RNS
-and this package must be importable by that Python.
+interfaces of its own, such as TCP clients of the other replicas' listeners
+(this replica does not relay); RNS and this package must be importable by
+that Python.
 
 ## Check a replica
 

@@ -1547,6 +1547,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "hpqc",
+ "libc",
  "log",
  "pyo3",
  "rand_core 0.6.4",

@@ -19,6 +19,7 @@ pub const NOT_FOUND: u8 = 1;
 pub const INVALID_BOX_ID: u8 = 2;
 pub const INVALID_SIGNATURE: u8 = 3;
 pub const INVALID_PAYLOAD: u8 = 5;
+pub const STORAGE_FULL: u8 = 6;
 pub const ALREADY_EXISTS: u8 = 10;
 pub const TOMBSTONE: u8 = 11;
 

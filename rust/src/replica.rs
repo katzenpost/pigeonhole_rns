@@ -36,6 +36,7 @@ const CHANNEL_QUEUE: usize = 16;
 const CHANNEL_HANDLERS: usize = 32;
 const FORWARD_INTERVAL: Duration = Duration::from_secs(2);
 const HANDOFF_INTERVAL: Duration = Duration::from_secs(30);
+/// The longest wait between GC runs, so a clock jump is caught within it.
 const GC_INTERVAL: Duration = Duration::from_secs(3600);
 /// RNS's Link stale time; Reticulum-rs defaults to 10 seconds, shorter than a Python peer's
 /// keepalive on a slow link.
@@ -54,6 +55,10 @@ pub struct Options {
     pub mixnet: String,
     pub forward_all: bool,
     pub announce_interval: Duration,
+    /// Seconds in a replica epoch.
+    pub epoch_seconds: f64,
+    pub max_storage_bytes: u64,
+    pub min_free_storage_bytes: u64,
     /// With feature `reticulum-py`: the config directory of the Python Reticulum instance that
     /// reaches replicas not serving the replica paths in mode 2.
     pub py_config: Option<PathBuf>,
@@ -308,14 +313,22 @@ pub async fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
     // Box plaintext is length prefixed by the client and the AEAD adds a tag. A size of zero
     // accepts any, for a bridge that defers to the mixnet replica's geometry check.
     let ct_size = (o.box_size > 0).then_some(o.box_size + 4 + 16);
-    let engine = Engine::new(
-        Store::open(&o.storage.join("boxes.sqlite"))?,
+    let mut engine = Engine::new(
+        Store::open_limited(&o.storage.join("boxes.sqlite"), o.max_storage_bytes, o.min_free_storage_bytes)?,
         self_dest.as_slice().try_into().unwrap(),
         me.address_hash().as_slice().try_into().unwrap(),
         ct_size,
         bridge.is_some(),
     )
     .bridging(wire::mixnet_id(&o.mixnet), o.forward_all);
+    engine.epoch_seconds = o.epoch_seconds;
+    if bridge.is_some() && o.epoch_seconds != crate::engine::EPOCH_SECONDS {
+        log::warn!(
+            "pigeonhole: replica epoch {}s differs from Katzenpost's {}s; bridged boxes expire out of step",
+            o.epoch_seconds,
+            crate::engine::EPOCH_SECONDS
+        );
+    }
     let r = Arc::new(Replica {
         engine,
         mesh: Mesh::new(t.clone(), me),
@@ -416,11 +429,14 @@ pub async fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
     });
     let rr = r.clone();
     tokio::spawn(async move {
+        // Once at start, then just past each replica epoch boundary.
         loop {
-            sleep(GC_INTERVAL).await;
-            if let Err(e) = rr.engine.gc() {
-                log::error!("pigeonhole: gc: {e}");
+            match rr.engine.gc() {
+                Ok(0) => {}
+                Ok(n) => log::info!("pigeonhole: gc dropped {n} boxes older than replica epoch {}", rr.engine.epoch() - 1),
+                Err(e) => log::error!("pigeonhole: gc: {e}"),
             }
+            sleep(GC_INTERVAL.min(Duration::from_secs_f64(rr.engine.till_next_epoch() + 1.0))).await;
         }
     });
 

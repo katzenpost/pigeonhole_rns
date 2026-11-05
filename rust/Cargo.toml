@@ -18,6 +18,7 @@ reticulum = { git = "https://github.com/BeechatNetworkSystemsLtd/Reticulum-rs", 
 hpqc = { git = "https://github.com/katzenpost/hpqc", rev = "625d91f541006dc51176ce39d50c5139bce8723e" }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
+libc = "0.2"
 env_logger = "0.11"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 log = "0.4"

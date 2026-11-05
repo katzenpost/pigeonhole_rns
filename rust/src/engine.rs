@@ -22,9 +22,12 @@ use crate::wire::{self, BoxId, Query, Reply};
 
 /// A pseudo destination for the local Katzenpost replica on a bridge node.
 pub const BRIDGE: &[u8] = b"bridge";
-const EPOCH_SECONDS: f64 = 7.0 * 24.0 * 3600.0;
-/// Katzenpost replicas count epochs from 2017-06-01 UTC; a bridged box must fall in the same
-/// epoch on both sides.
+/// Katzenpost's epoch is 20 minutes, and its replica epoch, which boxes are kept by, a week of
+/// them, both counted from 2017-06-01 UTC. A bridged box must fall in the same replica epoch on
+/// both sides.
+pub const EPOCH_PERIOD: f64 = 20.0 * 60.0;
+pub const REPLICA_EPOCH_EPOCHS: u32 = 504;
+pub const EPOCH_SECONDS: f64 = EPOCH_PERIOD * REPLICA_EPOCH_EPOCHS as f64;
 const EPOCH_BASE: f64 = 1496275200.0;
 const BACKOFF_BASE: f64 = 5.0;
 const BACKOFF_CAP: f64 = 600.0;
@@ -34,8 +37,9 @@ const TWIN_WAIT: u32 = 3;
 const LOW: BoxId = [0; 32];
 const HIGH: BoxId = [0xff; 32];
 
-pub fn epoch_at(now: f64) -> i64 {
-    ((now - EPOCH_BASE) / EPOCH_SECONDS).floor() as i64
+/// The replica epoch at `now`, of `period` seconds.
+pub fn epoch_at(now: f64, period: f64) -> i64 {
+    ((now - EPOCH_BASE) / period).floor() as i64
 }
 
 pub fn unix_now() -> f64 {
@@ -87,6 +91,8 @@ pub struct Engine {
     synced: Mutex<HashSet<Dst>>,
     /// A fixed time for tests; the wall clock when `None`.
     pub clock: Mutex<Option<f64>>,
+    /// Seconds in a replica epoch.
+    pub epoch_seconds: f64,
 }
 
 type Result<T> = rusqlite::Result<T>;
@@ -111,6 +117,7 @@ impl Engine {
             peers: Mutex::new(HashMap::from([(self_dest.to_vec(), me)])),
             synced: Mutex::default(),
             clock: Mutex::new(None),
+            epoch_seconds: EPOCH_SECONDS,
         }
     }
 
@@ -227,7 +234,7 @@ impl Engine {
             return Ok(code);
         }
         let dsts = self.forwards(reachable, sender, origin, sender.is_none());
-        self.store.put(box_id, signature, ciphertext, epoch_at(self.now()), &dsts, origin)
+        self.store.put(box_id, signature, ciphertext, self.epoch(), &dsts, origin)
     }
 
     pub fn handle_write(&self, data: &[u8], reachable: &[Dst], sender: Option<&Dst>) -> Vec<u8> {
@@ -349,7 +356,7 @@ impl Engine {
             let q = Query::Write { box_id: *box_id, signature: sig.clone(), ciphertext: ct.clone() };
             if self.verify(&q) == wire::SUCCESS {
                 let dsts = self.forwards(reachable, None, origin, false);
-                self.store.put(box_id, sig, ct, epoch_at(self.now()), &dsts, origin)?;
+                self.store.put(box_id, sig, ct, self.epoch(), &dsts, origin)?;
             }
         }
         Ok(())
@@ -519,8 +526,17 @@ impl Engine {
         Ok(())
     }
 
+    pub fn epoch(&self) -> i64 {
+        epoch_at(self.now(), self.epoch_seconds)
+    }
+
+    pub fn till_next_epoch(&self) -> f64 {
+        self.epoch_seconds - (self.now() - EPOCH_BASE).rem_euclid(self.epoch_seconds)
+    }
+
+    /// Keeps the current and previous replica epoch, as Katzenpost replicas do.
     pub fn gc(&self) -> Result<usize> {
-        let cur = epoch_at(self.now());
+        let cur = self.epoch();
         self.store.sweep(&[cur, cur - 1])
     }
 }
@@ -762,6 +778,35 @@ mod tests {
     }
 
     #[test]
+    fn gc_keeps_current_and_previous_epoch_across_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = engine(dir.path(), "e", d(b"me"), &[], false);
+        e.epoch_seconds = 3600.0;
+        *e.clock.lock().unwrap() = Some(EPOCH_BASE + 10.0 * 3600.0);
+        let step = |e: &Engine, by: f64| {
+            let t = e.clock.lock().unwrap().unwrap() + by;
+            *e.clock.lock().unwrap() = Some(t);
+        };
+        let mut boxes = vec![];
+        for _ in 0..2 {
+            let (b, s, c) = seal(false);
+            assert_eq!(e.store.put(&b, &s, &c, e.epoch(), &[], b"").unwrap(), wire::SUCCESS);
+            boxes.push(b);
+            step(&e, e.till_next_epoch());
+        }
+        // In epoch 12 the boxes from 10 and 11: the one from 10 goes at the boundary, not before.
+        assert_eq!(e.epoch(), 12);
+        step(&e, -1.0);
+        assert_eq!(e.gc().unwrap(), 0);
+        step(&e, 1.0);
+        assert_eq!(e.gc().unwrap(), 1);
+        assert!(e.store.get(&boxes[0]).unwrap().is_none() && e.store.get(&boxes[1]).unwrap().is_some());
+        step(&e, e.till_next_epoch());
+        assert_eq!(e.gc().unwrap(), 1);
+        assert!(e.store.get(&boxes[1]).unwrap().is_none());
+    }
+
+    #[test]
     fn open_bridge_replica_pushes_to_mixnet_and_gc() {
         let dir = tempfile::tempdir().unwrap();
         let e = engine(dir.path(), "e", d(b"me"), &[], true);
@@ -770,7 +815,10 @@ mod tests {
         assert_eq!(e.store.queued(&b).unwrap(), HashSet::from([BRIDGE.to_vec()]));
         *e.clock.lock().unwrap() = Some(1000.0 + 3.0 * EPOCH_SECONDS);
         assert_eq!(e.gc().unwrap(), 1);
-        assert_eq!(epoch_at(EPOCH_BASE + 3.0 * EPOCH_SECONDS + 5.0), 3);
+        assert_eq!(epoch_at(EPOCH_BASE + 3.0 * EPOCH_SECONDS + 5.0, EPOCH_SECONDS), 3);
+        // Katzenpost's ReplicaNow at 2026-11-05 00:00 UTC.
+        assert_eq!(EPOCH_SECONDS, 7.0 * 24.0 * 3600.0);
+        assert_eq!(epoch_at(1793836800.0, EPOCH_SECONDS), 492);
     }
 
     /// A node's name, and for a bridge its mixnet's name and the mixnet.
