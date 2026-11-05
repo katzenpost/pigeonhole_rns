@@ -72,17 +72,25 @@ up to 8 queries in flight per Link, from callers on several threads, under
 a replica's mode 2 queue of 16.
 
 1. **Requests.** Each query is a Link request to path `write` or `read`;
-   one over the Link MDU travels as a Resource. The replica paths exist only
-   in this mode.
+   one over the Link MDU travels as a Resource.
 2. **Channel.** Each query and reply is a run of Channel messages on the
    Link, for Reticulum stacks with Links and Channel but no Link requests
-   or Resources. The query's first byte, 0 read or 1 write, picks the
-   handler.
+   or Resources. The message's first byte picks the handler: 0 a read and 1
+   a write query, as they begin, and 2 `peek`, 3 `sync`, 4 `forward` and 5
+   `pushed`, followed by that path's request bytes and answered with its
+   response bytes.
 
 The announce's app data is one byte of flags: bit 0 says the replica is a
-bridge, bit 1 that it serves mode 2. A bridge follows it with its 16 byte
-mixnet id; one announcing none serves the mixnet of the empty name. A
-client in mode 2 uses only replicas announcing bit 1.
+bridge, bit 1 that it serves mode 2, bit 2 that it serves the replica paths
+in mode 2 too, and bit 3 that it serves no Link requests. A bridge follows it
+with its 16 byte mixnet id; one announcing none serves the mixnet of the
+empty name. A client in mode 2 uses only replicas announcing bit 1.
+
+Replicas ask each other in mode 2 first, when the other announces bit 2 (bit
+1 for a write), and as a Link request when it does not or mode 2 fails. One
+announcing bit 3, such as the Rust replica on Reticulum-rs, is asked only in
+mode 2, by replicas and by mode 1 clients alike. Python replicas serve both
+modes.
 
 ### Channel framing
 

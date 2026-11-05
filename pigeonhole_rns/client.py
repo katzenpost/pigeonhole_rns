@@ -66,16 +66,17 @@ class Client:
             if RNS.Destination.hash(identity_hash, APP_NAME, ASPECT) != dest:
                 continue
             flags = app_data[0] if app_data else 0
-            self._on_announce(dest, identity_hash, bool(flags & 1), bool(flags & 2))
+            self._on_announce(dest, identity_hash, bool(flags & 1), bool(flags & 2), flags=flags)
             if not RNS.Transport.has_path(dest):
                 RNS.Transport.request_path(dest)
 
-    def _on_announce(self, dest: bytes, identity_hash: bytes, bridge: bool, channel: bool = False, _mixnet: bytes = b"") -> None:
+    def _on_announce(self, dest: bytes, identity_hash: bytes, bridge: bool, channel: bool = False, _mixnet: bytes = b"", flags: int = 0) -> None:
         with self._mu:
             cur = self.replicas.get(dest)
             if cur is not None and cur[0] != identity_hash:
                 return
             self.replicas[dest] = (identity_hash, bridge)
+            self.links.flags[dest] = flags
             if channel:
                 self.channel_replicas.add(dest)
             else:
