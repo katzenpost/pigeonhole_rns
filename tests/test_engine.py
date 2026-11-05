@@ -350,3 +350,15 @@ def test_announce_carries_the_mixnet():
     h.received_announce(b"d" * 16, ident, bytes([1]))
     h.received_announce(b"d" * 16, ident, bytes([2]))
     assert [a[4] for a in got] == [wire.mixnet_id("A"), wire.mixnet_id(""), b""]
+
+
+def test_a_silent_peer_is_tried_once_a_round_and_holds_up_no_other(tmp_path):
+    e = engine(tmp_path, mode=OPEN)
+    boxes = [seal(index=i)[1:] for i in range(3)]
+    for box, sig, ct in boxes:
+        e.handle_write(wire.encode_write(box, sig, ct), reachable=[R2, R3])
+    tried = []
+    assert e.forward_due([R2, R3], lambda dst, b, s, c, o: tried.append(dst) or (None if dst == R2 else wire.SUCCESS)) == 3
+    assert tried.count(R2) == 1 and tried.count(R3) == 3
+    assert {d for _, d, _ in e.store.due(e.clock[0])} == set()
+    assert {d for _, d, _ in e.store.due(e.clock[0] + 3600)} == {R2}
