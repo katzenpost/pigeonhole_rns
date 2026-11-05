@@ -24,6 +24,8 @@ jobs:
         run: python tests/e2e_two_replicas.py --run-dir "$RUNNER_TEMP/e2e500" --box-size 1000 --mtu-discovery no
       - name: Open mode, five replicas in a line, one late and one restarted
         run: python tests/e2e_replication.py --run-dir "$RUNNER_TEMP/repl" -n 5 --topo line
+      - name: Push, from a replica's own writes, replication and its store
+        run: python tests/e2e_push.py --run-dir "$RUNNER_TEMP/push"
 
   # The Rust replica on Reticulum-rs, and Python and Rust replicas replicating together.
   rust:
@@ -47,6 +49,8 @@ jobs:
         run: python tests/e2e_replication.py --run-dir "$RUNNER_TEMP/rmesh" -n 4 --topo mesh --rust 1,3
       - name: The same, five in a line, Rust replicas 1 and 3 between Python ones
         run: python tests/e2e_replication.py --run-dir "$RUNNER_TEMP/rline" -n 5 --topo line --rust 1,3
+      - name: Push from the Rust replica
+        run: python tests/e2e_push.py --run-dir "$RUNNER_TEMP/rpush" --rust-bin rust/target/release/replica_rns-rs
       - name: Rust replicas alone, four in a line
         run: python tests/e2e_replication.py --run-dir "$RUNNER_TEMP/rrust" -n 4 --topo line --rust 0,1,2,3
 

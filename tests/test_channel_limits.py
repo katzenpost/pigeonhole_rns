@@ -13,6 +13,10 @@ from pigeonhole_rns import channel, replica
 
 class StubLink:
     status = RNS.Link.ACTIVE
+    link_id = b"L" * 16
+
+    def set_link_closed_callback(self, cb):
+        pass
 
 
 def setup(monkeypatch, handlers=replica.CHANNEL_HANDLERS):
@@ -33,6 +37,8 @@ def setup(monkeypatch, handlers=replica.CHANNEL_HANDLERS):
         _stop=threading.Event(),
         _channel_handlers=threading.BoundedSemaphore(handlers),
         _on_frame_query=on_frame_query,
+        _pushers={},
+        _on_closed=None,
     )
     return me, accepted, running, peak, release
 
