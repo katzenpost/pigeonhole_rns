@@ -50,7 +50,8 @@ const NO_REQUESTS_FLAG: u8 = 8;
 pub struct Options {
     pub config_dir: PathBuf,
     pub storage: PathBuf,
-    pub box_size: usize,
+    /// Box ciphertext sizes taken, any when empty.
+    pub box_sizes: Vec<usize>,
     pub bridge_socket: Option<PathBuf>,
     pub mixnet: String,
     pub forward_all: bool,
@@ -310,14 +311,11 @@ pub async fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
 
     let bridge = o.bridge_socket.as_ref().map(|p| Bridge::new(p.clone(), 8));
     let bridge_writes = o.bridge_socket.as_ref().map(|p| Bridge::new(p.clone(), 1));
-    // Box plaintext is length prefixed by the client and the AEAD adds a tag. A size of zero
-    // accepts any, for a bridge that defers to the mixnet replica's geometry check.
-    let ct_size = (o.box_size > 0).then_some(o.box_size + 4 + 16);
     let mut engine = Engine::new(
         Store::open_limited(&o.storage.join("boxes.sqlite"), o.max_storage_bytes, o.min_free_storage_bytes)?,
         self_dest.as_slice().try_into().unwrap(),
         me.address_hash().as_slice().try_into().unwrap(),
-        ct_size,
+        o.box_sizes.clone(),
         bridge.is_some(),
     )
     .bridging(wire::mixnet_id(&o.mixnet), o.forward_all);

@@ -16,6 +16,9 @@ import struct
 from dataclasses import dataclass
 from typing import Optional
 
+import RNS
+from RNS.vendor import umsgpack
+
 READ = 0
 WRITE = 1
 
@@ -45,6 +48,45 @@ MIXNET_ID_SIZE = 16
 
 def mixnet_id(name: str) -> bytes:
     return hashlib.sha256(name.encode()).digest()[:MIXNET_ID_SIZE]
+
+
+# Box payload profiles: a replica takes boxes of several plaintext sizes at
+# once. A client length prefixes the plaintext (4 bytes) and pads it to one,
+# and the AEAD adds a 16 byte tag; Box ID and signature sizes never change.
+# The mixnet's is fixed by its Sphinx geometry. The mesh's is the largest
+# whose write, and a replica's forward of it, go in one Link packet at
+# Reticulum's 500 byte MTU in either query mode: request mode frames a query
+# as msgpack [timestamp, path hash, data], more than Channel mode's envelope
+# (msgtype, sequence, length), frame head and path byte.
+BOX_OVERHEAD = 4 + 16
+BOX_PLAINTEXT_MIXNET = 1549
+REQUEST_OVERHEAD = len(umsgpack.packb([0.0, bytes(16), bytes(300)])) - 300
+CHANNEL_OVERHEAD = 6 + 4 + 1
+FORWARD_HEAD = MIXNET_ID_SIZE + 1 + BOX_ID_SIZE + SIGNATURE_SIZE
+BOX_PLAINTEXT_MESH = RNS.Link.MDU - max(REQUEST_OVERHEAD, CHANNEL_OVERHEAD) - FORWARD_HEAD - BOX_OVERHEAD
+BOX_PROFILES = {"mesh": BOX_PLAINTEXT_MESH, "mixnet": BOX_PLAINTEXT_MIXNET}
+MAX_BOX_SIZES = 8
+
+
+def parse_box_sizes(text: str) -> tuple:
+    """Plaintext sizes from a comma separated list of profile names and
+    sizes, at most MAX_BOX_SIZES and none over the mixnet's; 0 alone, an
+    empty tuple, for any size."""
+    sizes = tuple(BOX_PROFILES[n] if n in BOX_PROFILES else int(n) for n in text.split(","))
+    if sizes == (0,):
+        return ()
+    if len(sizes) > MAX_BOX_SIZES or any(not 0 < n <= BOX_PLAINTEXT_MIXNET for n in sizes):
+        raise ValueError("at most %d box sizes, each from 1 to %d, or 0 alone for any" % (MAX_BOX_SIZES, BOX_PLAINTEXT_MIXNET))
+    return sizes
+
+
+def ciphertext_sizes(plain) -> tuple:
+    """The ciphertext sizes a replica takes for plaintext sizes: those, and
+    always the mesh's and the mixnet's, since boxes of either can arrive
+    through a bridge or replication. Empty, any size, for none."""
+    if not plain:
+        return ()
+    return tuple(sorted({n + BOX_OVERHEAD for n in (*plain, BOX_PLAINTEXT_MESH, BOX_PLAINTEXT_MIXNET)}))
 
 
 # Codes that mean the receiver holds the box after a write.

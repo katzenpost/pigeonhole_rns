@@ -86,12 +86,13 @@ class Engine:
         store: Store,
         self_dest: bytes,
         self_identity: bytes,
-        box_ciphertext_size: Optional[int] = None,
+        box_ciphertext_sizes: Iterable[int] = (),
         is_bridge: bool = False,
         now: Callable[[], float] = time.time,
         mixnet: bytes = b"",
         forward: str = ALL,
         epoch_seconds: float = EPOCH_SECONDS,
+        log: Callable[[str], None] = lambda _: None,
     ):
         if forward not in (ALL, ON_REQUEST):
             raise ValueError("forward must be all or on-request")
@@ -101,7 +102,9 @@ class Engine:
         self.store = store
         self.self_dest = self_dest
         self.is_bridge = is_bridge
-        self.box_ciphertext_size = box_ciphertext_size
+        # Empty takes any size, for a bridge that defers to the mixnet replica's geometry check.
+        self.box_ciphertext_sizes = frozenset(box_ciphertext_sizes)
+        self.log = log
         self.now = now
         self.epoch_seconds = epoch_seconds
         self.peers: Dict[bytes, Peer] = {self_dest: Peer(self_identity, is_bridge, mixnet=self.mixnet)}
@@ -151,7 +154,10 @@ class Engine:
 
     def verify(self, q: wire.Query) -> int:
         assert q.signature is not None and q.ciphertext is not None
-        if len(q.ciphertext) != 0 and self.box_ciphertext_size is not None and len(q.ciphertext) != self.box_ciphertext_size:
+        n, sizes = len(q.ciphertext), self.box_ciphertext_sizes
+        if n != 0 and sizes and n not in sizes:
+            self.log("pigeonhole: box %s refused: ciphertext of %d bytes, this replica takes %s"
+                     % (q.box_id.hex()[:16], n, ", ".join(map(str, sorted(sizes)))))
             return wire.INVALID_PAYLOAD
         try:
             ok = MessageBoxIndex.verify_box(q.box_id, q.ciphertext, q.signature)

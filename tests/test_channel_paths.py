@@ -74,7 +74,7 @@ def test_announce_passes_the_flags():
 
 
 def node(tmp_path):
-    e = Engine(Store(str(tmp_path / "e.sqlite")), ME, b"I" + ME, box_ciphertext_size=BOX + 20)
+    e = Engine(Store(str(tmp_path / "e.sqlite")), ME, b"I" + ME, box_ciphertext_sizes=(BOX + 20,))
     e.heard(PEER, b"I" + PEER, False)
     me = types.SimpleNamespace(engine=e, links=types.SimpleNamespace(peek=lambda d, b: None), _bridge_read=lambda: None,
                                _reachable=lambda: [PEER], _kick=threading.Event())

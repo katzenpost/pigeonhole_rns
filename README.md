@@ -139,10 +139,42 @@ A Linux x86_64 executable, a wheel and an sdist are attached to each
 
 ## Run a replica
 
-    replica_rns --config ~/.reticulum --box-size 1000 replica --storage ~/pigeonhole
+    replica_rns --config ~/.reticulum replica --storage ~/pigeonhole
 
-`--box-size` is the box plaintext size and must be the same on every replica
-and, through a bridge, equal to the mixnet's. A bridge adds
+A replica stores boxes of several sizes at once, since meshes and mixnets
+linked through bridges need not share one: always the `mesh` and `mixnet`
+sizes below, and those `--box-size` lists, comma separated, each a profile
+name or a plaintext size in bytes, at most 8 and none over 1549. It refuses a
+box of any other size with `INVALID_PAYLOAD`, logging the size and the sizes
+it takes, and a replica forwarding the box drops it then; a tombstone has no
+payload and is always taken. `0` alone takes any size. The command line
+client pads to the first size listed, `mesh` by default.
+
+### Box sizes
+
+| profile | plaintext | ciphertext | write query |
+|---|---|---|---|
+| `mesh` (the default) | 267 | 287 | 384 |
+| `mixnet` | 1549 | 1569 | 1666 |
+
+A box is the 32 byte Box ID, the 64 byte signature and the ciphertext: the
+plaintext with a 4 byte big endian length before it, zero padded, and a 16
+byte AEAD tag. Only the ciphertext's size differs between profiles; the
+query and reply encodings above do not change. `mixnet` is the Katzenpost
+box, fixed by the Sphinx geometry. `mesh` is derived from Reticulum's
+constants (`wire.py`, `rust/src/wire.rs`) as the largest box whose write, and
+a replica's forward of it (16 more bytes of mixnet id, one of path), go in a
+single Link packet at the 500 byte MTU in either query mode: the Link MDU of
+431 bytes less request mode's 31 byte msgpack framing, more than Channel
+mode's 11, less the forward's 113 byte head and the 20 bytes of box
+overhead. A client's write has 16 bytes to spare in request mode and 37 in
+Channel mode; a read reply is 32 bytes smaller still.
+
+A bridge carries boxes of every size it takes between the mesh and the
+Katzenpost replica unchanged; `0` leaves the check to the Katzenpost replica.
+The Katzenpost replica stores sizes besides its geometry's when given them
+in `BoxPayloadLengths`, so a bridged mixnet lists `mesh`'s 267 and any other
+size the bridge carries. A bridge adds
 `--bridge-socket /path/to/replica/bridge.sock`, the `BridgeSocket` of a
 Katzenpost replica on the same host, and `--mixnet <name>` and `--forward`
 (see Bridges).
@@ -186,7 +218,7 @@ requests or Resources, so it speaks mode 2 alone, to clients and replicas,
 and announces bits 1, 2 and 3; Python replicas ask it in mode 2.
 
     cd rust && cargo build --release
-    rust/target/release/replica_rns-rs --config ~/.reticulum --box-size 1000 replica --storage ~/pigeonhole
+    rust/target/release/replica_rns-rs --config ~/.reticulum replica --storage ~/pigeonhole
 
 Two limits of Reticulum-rs at that revision: as a transport node it does not
 relay to a Python node on the last hop (it keeps the transport header Python

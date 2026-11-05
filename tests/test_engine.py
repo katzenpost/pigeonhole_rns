@@ -19,7 +19,7 @@ IDS = {ME: b"I" + ME, R2: b"I" + R2, R3: b"I" + R3, R4: b"I" + R4}
 
 def engine(tmp_path, is_bridge=False, peers=(R2, R3, R4), me=ME, name="e"):
     clock = [1000.0]
-    e = Engine(Store(str(tmp_path / (name + ".sqlite"))), me, IDS[me], box_ciphertext_size=CT, is_bridge=is_bridge, now=lambda: clock[0])
+    e = Engine(Store(str(tmp_path / (name + ".sqlite"))), me, IDS[me], box_ciphertext_sizes=(CT,), is_bridge=is_bridge, now=lambda: clock[0])
     e.clock = clock
     for p in peers:
         e.heard(p, IDS[p], False)
@@ -203,7 +203,7 @@ def test_sync_rejects_out_of_range_reply(tmp_path):
 
 
 def test_on_request_bridge_writes_only_client_boxes(tmp_path):
-    e = Engine(Store(str(tmp_path / "e.sqlite")), ME, IDS[ME], box_ciphertext_size=CT, is_bridge=True, forward=ON_REQUEST)
+    e = Engine(Store(str(tmp_path / "e.sqlite")), ME, IDS[ME], box_ciphertext_sizes=(CT,), is_bridge=True, forward=ON_REQUEST)
     e.heard(R2, IDS[R2], False)
     _, mine, sig, ct = seal()
     e.handle_write(wire.encode_write(mine, sig, ct), [R2])

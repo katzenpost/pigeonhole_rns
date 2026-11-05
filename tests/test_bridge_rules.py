@@ -81,7 +81,7 @@ class Mesh:
         self.dest = dest
         self.name = {d: n for n, d in dest.items()}
         for n, mx in nodes.items():
-            self.e[n] = Engine(Store(str(tmp_path / (n + ".sqlite"))), dest[n], b"I" + dest[n], box_ciphertext_size=CT,
+            self.e[n] = Engine(Store(str(tmp_path / (n + ".sqlite"))), dest[n], b"I" + dest[n], box_ciphertext_sizes=(CT,),
                                is_bridge=mx is not None, now=lambda: self.clock[0],
                                mixnet=wire.mixnet_id(mx.name) if mx else b"")
             if mx:
