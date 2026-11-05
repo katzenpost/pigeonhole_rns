@@ -14,7 +14,7 @@ from typing import Dict, Optional, Set, Tuple
 import RNS
 from hpqc.bacap.stateless import ReadCap, WriteCap
 
-from . import PIGEONHOLE_CTX, rnsio, wire
+from . import APP_NAME, ASPECT, PIGEONHOLE_CTX, rnsio, wire
 
 AEAD_OVERHEAD = 16
 
@@ -54,6 +54,21 @@ class Client:
         self.links = rnsio.Links()
         self._mu = threading.Lock()
         RNS.Transport.register_announce_handler(rnsio.AnnounceHandler(self._on_announce))
+        self._recall_replicas()
+
+    def _recall_replicas(self) -> None:
+        """Replicas this Reticulum instance heard announce before, with the flags of their
+        last announce, so a client need not wait for the next one; a path is asked for each."""
+        with RNS.Identity.known_destinations_lock:
+            known = [(d, e[2], e[3]) for d, e in RNS.Identity.known_destinations.items()]
+        for dest, public_key, app_data in known:
+            identity_hash = RNS.Identity.truncated_hash(public_key)
+            if RNS.Destination.hash(identity_hash, APP_NAME, ASPECT) != dest:
+                continue
+            flags = app_data[0] if app_data else 0
+            self._on_announce(dest, identity_hash, bool(flags & 1), bool(flags & 2))
+            if not RNS.Transport.has_path(dest):
+                RNS.Transport.request_path(dest)
 
     def _on_announce(self, dest: bytes, identity_hash: bytes, bridge: bool, channel: bool = False, _mixnet: bytes = b"") -> None:
         with self._mu:
@@ -71,7 +86,7 @@ class Client:
         while time.time() < deadline:
             if self.entry() is not None:
                 return True
-            time.sleep(0.2)
+            time.sleep(0.05)
         return False
 
     def entry(self) -> Optional[bytes]:
