@@ -12,7 +12,7 @@ boxes verified with `hpqc.bacap`, the same object the mixnet stores.
 
 ## Mesh modes
 
-**Open**: full replication, no sharding.
+**Open**: full replication, and no post-quantum authentication of replicas.
 Every replica stores every box. A replica that stores a new box, from a
 client, a forward, or a read, forwards it to every replica it has heard but
 the one it came from, retrying until each acknowledges; a box it already
@@ -23,15 +23,7 @@ boxes it lacks, and a tombstone wins over the box it replaces. Reads are
 served from the local store first. Replicas identify on the Links they open
 to each other, so a forward's sender is known.
 
-**Closed** (future): sharded. Boxes are placed by rendezvous hashing over
-the replicas a node has heard, two owners per box; an entry replica stores
-a client's write, acknowledges, and forwards along the box's order,
-standing in for owners it cannot reach and handing off, then dropping its
-copy, when it can. Reads walk the order past the owners. A closed mesh also
-needs out of band authentication of its replicas. Neither is implemented;
-the sharding code is kept on the branch `saved/closed-mode-sharding`.
-
-In both modes boxes crossing a bridge are sharded on the Katzenpost side,
+Boxes crossing a bridge are sharded on the Katzenpost side,
 as the mixnet places them.
 
 ## Bridges
@@ -180,7 +172,7 @@ the revision `katzenpost/pigeonhole_protocols` uses, with BACAP from the Rust
 `hpqc`. It keeps the store (the same SQLite file, with the same replica
 epochs, GC and storage limits and their options), open mode and sync, the
 bridge and its rules, the identity file and the command line, and reads the
-TCP and UDP interfaces of a Reticulum config file. It has no closed mode.
+TCP and UDP interfaces of a Reticulum config file.
 Reticulum-rs has Links and Channel but no Link
 requests or Resources, so it speaks mode 2 alone, to clients and replicas,
 and announces bits 1, 2 and 3; Python replicas ask it in mode 2.
