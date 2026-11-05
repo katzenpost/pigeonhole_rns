@@ -70,11 +70,12 @@ a replica's mode 2 queue of 16.
    or Resources. The message's first byte picks the handler: 0 a read and 1
    a write query, as they begin, and 2 `peek`, 3 `sync`, 4 `forward` and 5
    `pushed`, followed by that path's request bytes and answered with its
-   response bytes.
+   response bytes; 6 and 7 are `subscribe` and `unsubscribe` (see Push).
 
 The announce's app data is one byte of flags: bit 0 says the replica is a
 bridge, bit 1 that it serves mode 2, bit 2 that it serves the replica paths
-in mode 2 too, and bit 3 that it serves no Link requests. A bridge follows it
+in mode 2 too, bit 3 that it serves no Link requests, and bit 4 that it
+serves push. A bridge follows it
 with its 16 byte mixnet id; one announcing none serves the mixnet of the
 empty name. A client in mode 2 uses only replicas announcing bit 1.
 
@@ -103,6 +104,51 @@ A replica handles mode 2 queries on 2 worker threads per Link, with up to
 16 more queued per Link and at most 32 handled at once across the replica.
 A query arriving to a full queue is dropped; the client times out and asks
 again.
+
+### Push
+
+A client on a Link can subscribe to the Box IDs it waits for, and the
+replica pushes each box down that Link when it stores it: written by a
+client, arriving from another replica by forward or sync, or pulled from the
+mixnet on a bridge. A client that never subscribes polls as before. All
+integers are big endian.
+
+Subscribe is mode 2 op 6, or Link request path `subscribe` with the same
+bytes after the op:
+
+    6 | ttl u16 seconds | box id 32 | box id 32 | ...
+
+answered with
+
+    0 (SUCCESS) | taken u16 | ttl u16
+
+`taken` IDs, the first in order, are subscribed; the rest are refused
+because the Link already waits for 256. Subscribing an ID the Link waits for
+renews it and counts as taken. The subscription lasts the granted `ttl`, the
+asked one capped at 3600 seconds, 0 asking for 3600; a client renews by
+subscribing again. A Box ID already held is pushed at once. A malformed
+subscribe is answered with the one byte 5 (INVALID_PAYLOAD).
+
+Unsubscribe is op 7, or path `unsubscribe`:
+
+    7 | box id 32 | box id 32 | ...
+
+dropping those IDs from the Link, or every one when none are named, and
+answered with the one byte 0. Closing the Link drops all of them.
+
+A push is a Channel message of MSGTYPE `0x5049`, framed as mode 2 messages
+are (request id, piece index, piece count, piece), under request ids the
+replica counts per Link:
+
+    box id 32 | reply
+
+the reply as for a read: 0 with the signature and ciphertext, or 11 for a
+tombstone. Pushes go only over Channel, also to a Link that subscribed with
+a Link request. A push consumes the subscription, since a box is written
+once; the client subscribes to the stream's next Box ID. Pushes are best
+effort: one sent as the Link closes is lost, and one is dropped when 256
+wait to be sent on its Link, so a client reconnecting reads what it waits
+for once and subscribes again.
 
 ### Bytes on the wire
 
@@ -175,7 +221,8 @@ bridge and its rules, the identity file and the command line, and reads the
 TCP and UDP interfaces of a Reticulum config file.
 Reticulum-rs has Links and Channel but no Link
 requests or Resources, so it speaks mode 2 alone, to clients and replicas,
-and announces bits 1, 2 and 3; Python replicas ask it in mode 2.
+and announces bits 1, 2, 3 and 4; Python replicas ask it in mode 2. Clients
+subscribe on it in mode 2 alone.
 
     cd rust && cargo build --release
     rust/target/release/replica_rns-rs --config ~/.reticulum --box-size 1000 replica --storage ~/pigeonhole
@@ -220,6 +267,11 @@ mesh or a line, holds the last back until boxes are written, stops replica 1
 while more are written, then tombstones half, and passes when every replica
 holds every box or its tombstone. `--rust 1,3` runs those replicas with the
 Rust replica (`--rust-bin`, by default `rust/target/release/replica_rns-rs`).
+
+`tests/e2e_push.py` starts a Python replica B and a replica A, Python or with
+`--rust-bin` Rust, and a client subscribes on A: it must be pushed a box A
+already held, one written to A, and one written to B that reaches A by
+replication, and nothing for a Box ID it unsubscribed.
 
 The end to end test starts two replica processes on a local TCP interface
 and drives a client through write, read, forward, delete and tombstone in

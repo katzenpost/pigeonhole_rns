@@ -6,6 +6,7 @@ mod channel;
 mod config;
 mod engine;
 mod mesh;
+mod push;
 #[cfg(feature = "reticulum-py")]
 mod pyfallback;
 mod replica;

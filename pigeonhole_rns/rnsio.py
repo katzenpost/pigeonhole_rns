@@ -17,7 +17,7 @@ class AnnounceHandler:
     """Feeds replica announces to a callback (dest_hash, identity_hash, bridge,
     channel, mixnet, flags). App data is a flags byte, bit 0 bridge,
     bit 1 serves query mode 2, bit 2 serves the replica paths in mode 2 too and
-    bit 3 serves no Link requests, then for a bridge the id of its mixnet; a
+    bit 3 serves no Link requests and bit 4 serves push, then for a bridge the id of its mixnet; a
     bridge announcing none serves the mixnet named by the empty string."""
 
     aspect_filter = ASPECT_FILTER
@@ -51,8 +51,10 @@ class Links:
     API carries payloads over the MDU as Resources by itself."""
 
     def __init__(self, establish_timeout: float = 20.0, request_timeout: float = 60.0, identity: Optional[RNS.Identity] = None, window: int = 8,
-                 prefer_channel: bool = False):
+                 prefer_channel: bool = False, on_push=None):
+        """on_push(endpoint, bytes) gets each push on a Link this opened, in mode 2."""
         self.identity = identity
+        self.on_push = on_push
         self.window = window
         self.establish_timeout = establish_timeout
         self.request_timeout = request_timeout
@@ -147,7 +149,7 @@ class Links:
                 ep = self._endpoints.get(link.link_id)
                 if ep is None:
                     self._endpoints = {k: e for k, e in self._endpoints.items() if e.link.status != RNS.Link.CLOSED}
-                    ep = self._endpoints[link.link_id] = channel.Endpoint(link, self._on_reply)
+                    ep = self._endpoints[link.link_id] = channel.Endpoint(link, self._on_reply, self.on_push)
                 rid = self._next_id
                 self._next_id = (rid + 1) & 0xFFFF
                 slot = self._replies[rid] = [threading.Event(), None]
