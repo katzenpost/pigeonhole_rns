@@ -18,7 +18,7 @@ use reticulum::iface::tcp_client::TcpClient;
 use reticulum::iface::udp::UdpInterface;
 use reticulum::transport::{TimerConfig, Transport, TransportConfig};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio::sync::{Mutex, Notify, Semaphore, mpsc};
 use tokio::time::{interval, sleep, timeout};
 
 use crate::bridge::Bridge;
@@ -67,6 +67,8 @@ pub struct Replica {
     /// Forwards keep a connection of their own, so reads filling the pool cannot delay them.
     bridge_writes: Option<Bridge>,
     handlers: Semaphore,
+    /// Wakes the forwarder when a write, forward or sync queues forwards.
+    kick: Notify,
     /// Each replica's announce flags.
     flags: StdMutex<HashMap<Dst, u8>>,
     #[cfg(feature = "reticulum-py")]
@@ -173,6 +175,9 @@ impl Replica {
             Some(&channel::PUSHED) => e.handle_pushed(body),
             _ => Ok(vec![wire::INVALID_PAYLOAD]),
         };
+        if matches!(msg.first(), Some(&wire::WRITE | &channel::SYNC | &channel::FORWARD)) {
+            self.kick.notify_one();
+        }
         r.unwrap_or_else(|err| {
             log::error!("pigeonhole: store: {err}");
             vec![4] // DATABASE_FAILURE
@@ -318,6 +323,7 @@ pub async fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
         bridge,
         bridge_writes,
         handlers: Semaphore::new(CHANNEL_HANDLERS),
+        kick: Notify::new(),
         flags: StdMutex::default(),
         #[cfg(feature = "reticulum-py")]
         py,
@@ -385,7 +391,10 @@ pub async fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
     let rr = r.clone();
     tokio::spawn(async move {
         loop {
-            sleep(FORWARD_INTERVAL).await;
+            tokio::select! {
+                _ = sleep(FORWARD_INTERVAL) => {}
+                _ = rr.kick.notified() => {}
+            }
             let reach = rr.reachable().await;
             if let Err(e) = rr.engine.forward_due(&reach, &*rr).await {
                 log::error!("pigeonhole: forwarder: {e}");

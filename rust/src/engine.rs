@@ -360,19 +360,30 @@ impl Engine {
     /// Attempts every due forward whose destination is reachable. Before writing into its
     /// mixnet, a bridge asks the others serving it: one has written the box, and this one
     /// acknowledges it as written, or this one is first in the box's order among them, or has
-    /// waited TWIN_WAIT retries, and writes it. Returns how many were acknowledged.
+    /// waited TWIN_WAIT retries, and writes it. Destinations are served at once, each in queue
+    /// order; one that does not answer is not tried again this round, its other forwards
+    /// backing off untried. Returns how many were acknowledged.
     pub async fn forward_due(&self, reachable: &[Dst], net: &impl Net) -> Result<usize> {
         let now = self.now();
-        let mut done = 0;
+        let mut by_dst: HashMap<Dst, Vec<(BoxId, u32)>> = HashMap::new();
         for (box_id, dst, attempts) in self.store.due(now)? {
-            if dst != BRIDGE && !reachable.contains(&dst) {
-                continue;
+            if dst == BRIDGE || reachable.contains(&dst) {
+                by_dst.entry(dst).or_default().push((box_id, attempts));
             }
+        }
+        let rounds = by_dst.into_iter().map(|(dst, items)| self.forward_to(dst, items, reachable, net, now));
+        futures_util::future::join_all(rounds).await.into_iter().sum()
+    }
+
+    async fn forward_to(&self, dst: Dst, items: Vec<(BoxId, u32)>, reachable: &[Dst], net: &impl Net, now: f64) -> Result<usize> {
+        let mut done = 0;
+        let mut silent = false;
+        for (box_id, attempts) in items {
             let Some(b) = self.store.get(&box_id)? else {
                 self.store.forget(&box_id, &dst)?;
                 continue;
             };
-            let twins = if dst == BRIDGE { self.twins(reachable) } else { vec![] };
+            let twins = if dst == BRIDGE && !silent { self.twins(reachable) } else { vec![] };
             let mut code = None;
             let mut twin_wrote = false;
             for t in &twins {
@@ -384,11 +395,14 @@ impl Engine {
             }
             if twin_wrote {
                 code = Some(wire::SUCCESS);
-            } else if twins.is_empty()
-                || attempts >= TWIN_WAIT
-                || self.order(&box_id, twins.into_iter().chain([self.self_dest.clone()])).first() == Some(&self.self_dest)
+            } else if !silent
+                && (twins.is_empty()
+                    || attempts >= TWIN_WAIT
+                    || self.order(&box_id, twins.into_iter().chain([self.self_dest.clone()])).first()
+                        == Some(&self.self_dest))
             {
                 code = net.deliver(&dst, &box_id, &b.signature, &b.payload, &b.origin).await;
+                silent = code.is_none();
             }
             match code {
                 Some(c) if wire::stored(c) => {
