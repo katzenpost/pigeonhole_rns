@@ -6,7 +6,6 @@ replica destination, keeping a Link to it, and making a request on it."""
 from __future__ import annotations
 
 import threading
-import time
 from typing import Dict, Optional
 
 import RNS
@@ -71,20 +70,14 @@ class Links:
             return link
         identity = RNS.Identity.recall(dest)
         if identity is None:
-            RNS.Transport.request_path(dest)
-            deadline = time.time() + self.establish_timeout
-            while identity is None and time.time() < deadline:
-                time.sleep(0.2)
-                identity = RNS.Identity.recall(dest)
+            RNS.Transport.await_path(dest, self.establish_timeout)
+            identity = RNS.Identity.recall(dest)
             if identity is None:
                 return None
         destination = RNS.Destination(identity, RNS.Destination.OUT, RNS.Destination.SINGLE, APP_NAME, ASPECT)
-        link = RNS.Link(destination)
-        deadline = time.time() + self.establish_timeout
-        while link.status != RNS.Link.ACTIVE and time.time() < deadline:
-            if link.status == RNS.Link.CLOSED:
-                return None
-            time.sleep(0.1)
+        settled = threading.Event()
+        link = RNS.Link(destination, established_callback=lambda _l: settled.set(), closed_callback=lambda _l: settled.set())
+        settled.wait(self.establish_timeout)
         if link.status != RNS.Link.ACTIVE:
             link.teardown()
             return None
@@ -100,12 +93,11 @@ class Links:
             link = self._link(dest)
             if link is None:
                 return None
-            receipt = link.request(path, data, timeout=self.request_timeout)
+            done = threading.Event()
+            receipt = link.request(path, data, response_callback=lambda _r: done.set(), failed_callback=lambda _r: done.set(), timeout=self.request_timeout)
             if receipt is False or receipt is None:
                 return None
-            deadline = time.time() + self.request_timeout
-            while receipt.status not in (RNS.RequestReceipt.READY, RNS.RequestReceipt.FAILED) and time.time() < deadline:
-                time.sleep(0.05)
+            done.wait(self.request_timeout)
             if receipt.status != RNS.RequestReceipt.READY:
                 return None
             resp = receipt.response
