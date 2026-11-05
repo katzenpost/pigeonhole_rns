@@ -87,7 +87,7 @@ class Replica:
         self.forward_interval = forward_interval
         self.handoff_interval = handoff_interval
         self._stop = threading.Event()
-        # Set when a write or sync may have queued forwards, so they go now and not on the next tick.
+        # Set when a write, forward or sync may have queued forwards, so they go now and not on the next tick.
         self._kick = threading.Event()
         self._channel_handlers = threading.BoundedSemaphore(CHANNEL_HANDLERS)
         RNS.Transport.register_announce_handler(rnsio.AnnounceHandler(self._on_announce))
@@ -124,7 +124,9 @@ class Replica:
         return reply
 
     def _on_forward(self, path, data, request_id, link_id, remote_identity, requested_at):
-        return self.engine.handle_forward(bytes(data), self._reachable(), self._sender(remote_identity))
+        reply = self.engine.handle_forward(bytes(data), self._reachable(), self._sender(remote_identity))
+        self._kick.set()
+        return reply
 
     def _on_pushed(self, path, data, request_id, link_id, remote_identity, requested_at):
         return self.engine.handle_pushed(bytes(data))
