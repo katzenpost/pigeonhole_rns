@@ -51,3 +51,17 @@ def test_sweep_keeps_the_window(tmp_path):
     assert s.sweep([7, 6]) == 1
     assert s.get(old) is None and s.get(cur) is not None
     assert s.queued(old) == set()
+
+
+def test_store_without_origin_is_migrated(tmp_path):
+    import sqlite3
+
+    p = str(tmp_path / "old.sqlite")
+    db = sqlite3.connect(p)
+    db.execute("CREATE TABLE boxes (box_id BLOB PRIMARY KEY, epoch INTEGER NOT NULL, signature BLOB NOT NULL, payload BLOB NOT NULL)")
+    db.execute("INSERT INTO boxes VALUES (?, 1, ?, ?)", (b"b" * 32, b"s" * 64, b"p"))
+    db.commit()
+    db.close()
+    s = Store(p)
+    assert s.get(b"b" * 32).origin == b""
+    assert s.put(b"c" * 32, b"s" * 64, b"p", 1, origin=b"o" * 16) == 0 and s.get(b"c" * 32).origin == b"o" * 16

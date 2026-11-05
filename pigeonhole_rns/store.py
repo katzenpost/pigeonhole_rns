@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS boxes (
     box_id    BLOB PRIMARY KEY,
     epoch     INTEGER NOT NULL,
     signature BLOB NOT NULL,
-    payload   BLOB NOT NULL
+    payload   BLOB NOT NULL,
+    origin    BLOB NOT NULL DEFAULT x''
 );
 CREATE INDEX IF NOT EXISTS boxes_epoch ON boxes(epoch);
 CREATE TABLE IF NOT EXISTS acks (
@@ -42,6 +43,8 @@ class Box:
     epoch: int
     signature: bytes
     payload: bytes
+    # The mixnet a box was pulled from, empty for one written on the mesh.
+    origin: bytes = b""
 
     @property
     def is_tombstone(self) -> bool:
@@ -56,6 +59,8 @@ class Store:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA synchronous=FULL")
             self._db.executescript(SCHEMA)
+            if "origin" not in [r[1] for r in self._db.execute("PRAGMA table_info(boxes)")]:
+                self._db.execute("ALTER TABLE boxes ADD COLUMN origin BLOB NOT NULL DEFAULT x''")
 
     def close(self) -> None:
         with self._lock:
@@ -66,13 +71,13 @@ class Store:
     def get(self, box_id: bytes) -> Optional[Box]:
         with self._lock:
             row = self._db.execute(
-                "SELECT epoch, signature, payload FROM boxes WHERE box_id = ?", (box_id,)
+                "SELECT epoch, signature, payload, origin FROM boxes WHERE box_id = ?", (box_id,)
             ).fetchone()
         if row is None:
             return None
-        return Box(box_id, row[0], bytes(row[1]), bytes(row[2]))
+        return Box(box_id, row[0], bytes(row[1]), bytes(row[2]), bytes(row[3]))
 
-    def put(self, box_id: bytes, signature: bytes, payload: bytes, epoch: int, dsts: Iterable[bytes] = ()) -> int:
+    def put(self, box_id: bytes, signature: bytes, payload: bytes, epoch: int, dsts: Iterable[bytes] = (), origin: bytes = b"") -> int:
         """Stores a box and enqueues forwards to dsts in one transaction.
 
         Write once: the same bytes again is success, different bytes is
@@ -97,8 +102,8 @@ class Store:
                     # A tombstone replaces the box and the acks it had collected.
                     self._db.execute("DELETE FROM acks WHERE box_id = ?", (box_id,))
                 self._db.execute(
-                    "INSERT OR REPLACE INTO boxes (box_id, epoch, signature, payload) VALUES (?, ?, ?, ?)",
-                    (box_id, epoch, signature, payload),
+                    "INSERT OR REPLACE INTO boxes (box_id, epoch, signature, payload, origin) VALUES (?, ?, ?, ?, ?)",
+                    (box_id, epoch, signature, payload, origin),
                 )
                 for dst in dsts:
                     self._db.execute(

@@ -34,6 +34,31 @@ authentication of its replicas, which is not implemented.
 In both modes boxes crossing a bridge are sharded on the Katzenpost side,
 as the mixnet places them.
 
+## Bridges
+
+A bridge is a replica like any other: it stores every box and syncs. It
+also announces which mixnet it serves, as an id: the first 16 bytes of the
+SHA-256 of `--mixnet`, a name such as the mixnet's PKI identity, the same on
+every bridge to that mixnet. On top of replication:
+
+- Each bridge writes each box it stores into its mixnet. Bridges serving
+  the same mixnet ask each other first (path `pushed`): the first in the
+  box's order among them writes, the others wait up to three retries for
+  it and write themselves if it has not. A duplicate write is harmless.
+- A box a bridge pulls from its mixnet is stored with that mixnet as its
+  origin and replicates with it (path `forward`, the write prefixed with
+  the origin), so no bridge writes it back there, while bridges to other
+  mixnets do. One mesh links several mixnets without loops.
+- A read that misses on a replica asks every replica it reaches, bridges
+  asking their mixnets; the bridge that finds a box stores it and it
+  replicates from there.
+
+`--forward all` (the default) writes every box into the mixnet;
+`--forward on-request` writes only boxes clients write to this bridge,
+while it still pulls for reads. A tombstone written directly on a mixnet
+does not cross to the mesh, since the bridge socket returns a tombstone
+without its signature; one written on the mesh reaches every mixnet.
+
 The mixnet half of the bridge, a unix socket on the Katzenpost replica, is in
 the Katzenpost repository (`replica/bridge.go`).
 
@@ -42,7 +67,7 @@ the Katzenpost repository (`replica/bridge.go`).
 A client opens a Link to a replica's `pigeonhole.replica` destination and
 sends each query in one of two modes. Both carry the same query and reply
 bytes (`wire.py`) and one destination serves both. Replicas also use paths
-`peek` and `sync` between themselves.
+`peek`, `sync`, `forward` and `pushed` between themselves.
 
 1. **Requests.** Each query is a Link request to path `write` or `read`;
    one over the Link MDU travels as a Resource. The replica paths exist only
@@ -53,8 +78,9 @@ bytes (`wire.py`) and one destination serves both. Replicas also use paths
    handler.
 
 The announce's app data is one byte of flags: bit 0 says the replica is a
-bridge, bit 1 that it serves mode 2. A client in mode 2 uses only replicas
-announcing bit 1.
+bridge, bit 1 that it serves mode 2. A bridge follows it with its 16 byte
+mixnet id; one announcing none serves the mixnet of the empty name. A
+client in mode 2 uses only replicas announcing bit 1.
 
 ### Channel framing
 
@@ -106,7 +132,8 @@ A Linux x86_64 executable, a wheel and an sdist are attached to each
 `--box-size` is the box plaintext size and must be the same on every replica
 and, through a bridge, equal to the mixnet's. A bridge adds
 `--bridge-socket /path/to/replica/bridge.sock`, the `BridgeSocket` of a
-Katzenpost replica on the same host.
+Katzenpost replica on the same host, and `--mixnet <name>` and `--forward`
+(see Bridges).
 
 ## Check a replica
 

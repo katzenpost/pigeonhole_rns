@@ -55,7 +55,7 @@ class Client:
         self._mu = threading.Lock()
         RNS.Transport.register_announce_handler(rnsio.AnnounceHandler(self._on_announce))
 
-    def _on_announce(self, dest: bytes, identity_hash: bytes, bridge: bool, channel: bool = False) -> None:
+    def _on_announce(self, dest: bytes, identity_hash: bytes, bridge: bool, channel: bool = False, _mixnet: bytes = b"") -> None:
         with self._mu:
             cur = self.replicas.get(dest)
             if cur is not None and cur[0] != identity_hash:

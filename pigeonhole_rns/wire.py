@@ -11,6 +11,7 @@ code, and for a found box the signature and ciphertext.
 
 from __future__ import annotations
 
+import hashlib
 import struct
 from dataclasses import dataclass
 from typing import Optional
@@ -34,6 +35,17 @@ INVALID_EPOCH = 8
 REPLICATION_FAILED = 9
 ALREADY_EXISTS = 10
 TOMBSTONE = 11
+
+# A bridge announces the mixnet it serves as the first 16 bytes of the SHA-256
+# of a name its operator gives, such as the mixnet's PKI identity; bridges
+# with the same id serve one mixnet. A replica forwarding a box pulled from a
+# mixnet prefixes the write with that id, on path `forward`.
+MIXNET_ID_SIZE = 16
+
+
+def mixnet_id(name: str) -> bytes:
+    return hashlib.sha256(name.encode()).digest()[:MIXNET_ID_SIZE]
+
 
 # Codes that mean the receiver holds the box after a write.
 STORED_CODES = frozenset((SUCCESS, ALREADY_EXISTS))
