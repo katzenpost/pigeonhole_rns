@@ -45,15 +45,18 @@ def hops(dest: bytes) -> int:
 
 class Links:
     """One Link per replica destination, opened on demand and reopened when
-    lost. Requests on a link are serialised; the Link API carries payloads
-    over the MDU as Resources by itself."""
+    lost. Callers on several threads have up to window queries in flight
+    per Link at once, under a replica's per Link queue in mode 2; the Link
+    API carries payloads over the MDU as Resources by itself."""
 
-    def __init__(self, establish_timeout: float = 20.0, request_timeout: float = 60.0, identity: Optional[RNS.Identity] = None):
+    def __init__(self, establish_timeout: float = 20.0, request_timeout: float = 60.0, identity: Optional[RNS.Identity] = None, window: int = 8):
         self.identity = identity
+        self.window = window
         self.establish_timeout = establish_timeout
         self.request_timeout = request_timeout
         self._links: Dict[bytes, RNS.Link] = {}
         self._locks: Dict[bytes, threading.Lock] = {}
+        self._windows: Dict[bytes, threading.BoundedSemaphore] = {}
         self._mu = threading.Lock()
         self._endpoints: Dict[bytes, channel.Endpoint] = {}
         self._replies: Dict[int, list] = {}
@@ -62,6 +65,14 @@ class Links:
     def _lock(self, dest: bytes) -> threading.Lock:
         with self._mu:
             return self._locks.setdefault(dest, threading.Lock())
+
+    def _window(self, dest: bytes) -> threading.BoundedSemaphore:
+        with self._mu:
+            return self._windows.setdefault(dest, threading.BoundedSemaphore(self.window))
+
+    def _open(self, dest: bytes) -> Optional[RNS.Link]:
+        with self._lock(dest):
+            return self._link(dest)
 
     def _link(self, dest: bytes) -> Optional[RNS.Link]:
         with self._mu:
@@ -89,8 +100,8 @@ class Links:
 
     def request(self, dest: bytes, path: str, data: bytes) -> Optional[bytes]:
         """Returns the reply bytes, or None when the replica did not answer."""
-        with self._lock(dest):
-            link = self._link(dest)
+        with self._window(dest):
+            link = self._open(dest)
             if link is None:
                 return None
             done = threading.Event()
@@ -105,8 +116,8 @@ class Links:
 
     def channel_request(self, dest: bytes, data: bytes) -> Optional[bytes]:
         """Query mode 2: the same bytes as request(), as Channel frames."""
-        with self._lock(dest):
-            link = self._link(dest)
+        with self._window(dest):
+            link = self._open(dest)
             if link is None:
                 return None
             with self._mu:
