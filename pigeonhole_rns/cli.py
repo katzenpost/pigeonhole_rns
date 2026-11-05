@@ -32,6 +32,12 @@ def main(argv=None) -> int:
     r.add_argument("--mesh-mode", choices=("open", "closed"), default="open",
                    help="open: every replica stores every box; closed: boxes sharded over two owners each, without the authentication a closed mesh will need")
 
+    r.add_argument("--epoch-period", type=float, default=1200.0, help="seconds in an epoch, Katzenpost's 20 minutes by default")
+    r.add_argument("--replica-epoch-epochs", type=int, default=504,
+                   help="epochs in a replica epoch, a week by default; boxes are kept for the current and previous replica epoch")
+    r.add_argument("--max-storage-mib", type=int, default=0, help="most MiB the box store may take on disk; 0 for no limit")
+    r.add_argument("--min-free-storage-mib", type=int, default=500, help="MiB to leave free on the storage filesystem; 0 for none")
+
     sub.add_parser("new-cap", help="print a fresh write capability and its read capability")
 
     w = sub.add_parser("write", help="write a message at an index of a stream")
@@ -63,7 +69,9 @@ def main(argv=None) -> int:
         from .replica import Replica
 
         Replica(a.config, a.storage, a.box_size, bridge_socket=a.bridge_socket, announce_interval=a.announce_interval, mode=a.mesh_mode,
-                mixnet=a.mixnet, forward=a.forward, loglevel=loglevel).run_forever()
+                mixnet=a.mixnet, forward=a.forward, loglevel=loglevel, epoch_period=a.epoch_period,
+                replica_epoch_epochs=a.replica_epoch_epochs, max_storage_mib=a.max_storage_mib,
+                min_free_storage_mib=a.min_free_storage_mib).run_forever()
         return 0
 
     from .client import Client

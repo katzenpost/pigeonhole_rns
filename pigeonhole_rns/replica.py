@@ -43,6 +43,10 @@ class Replica:
         mixnet: str = "",
         forward: str = engine.ALL,
         loglevel: int = RNS.LOG_NOTICE,
+        epoch_period: float = engine.EPOCH_PERIOD,
+        replica_epoch_epochs: int = engine.REPLICA_EPOCH_EPOCHS,
+        max_storage_mib: int = 0,
+        min_free_storage_mib: int = 500,
     ):
         os.makedirs(storage_dir, exist_ok=True)
         self.reticulum = RNS.Reticulum(configdir=configdir, loglevel=loglevel)
@@ -71,7 +75,7 @@ class Replica:
         # mixnet replica's geometry check.
         ciphertext_size = box_plaintext_size + 4 + 16 if box_plaintext_size > 0 else None
         self.engine = engine.Engine(
-            Store(os.path.join(storage_dir, "boxes.sqlite")),
+            Store(os.path.join(storage_dir, "boxes.sqlite"), max_storage_mib << 20, min_free_storage_mib << 20),
             bytes(self.destination.hash),
             bytes(self.identity.hash),
             box_ciphertext_size=ciphertext_size,
@@ -80,7 +84,11 @@ class Replica:
             mode=mode,
             mixnet=wire.mixnet_id(mixnet),
             forward=forward,
+            epoch_seconds=epoch_period * replica_epoch_epochs,
         )
+        if self.bridge is not None and self.engine.epoch_seconds != engine.EPOCH_SECONDS:
+            RNS.log("pigeonhole: replica epoch %ds differs from Katzenpost's %ds; bridged boxes expire out of step"
+                    % (self.engine.epoch_seconds, engine.EPOCH_SECONDS), RNS.LOG_WARNING)
         # Links identify, so a replica can tell a forward's sender and not send the box back.
         self.links = rnsio.Links(identity=self.identity, prefer_channel=True)
         self.announce_interval = announce_interval
@@ -225,11 +233,16 @@ class Replica:
                 RNS.log("pigeonhole: handoff: %s" % e, RNS.LOG_ERROR)
 
     def _gc_loop(self) -> None:
-        while not self._stop.wait(3600.0):
+        # Once at start, then just past each replica epoch boundary; the hour cap survives clock jumps.
+        while True:
             try:
-                self.engine.gc()
+                n = self.engine.gc()
+                if n:
+                    RNS.log("pigeonhole: gc dropped %d boxes older than replica epoch %d" % (n, self.engine.epoch() - 1), RNS.LOG_NOTICE)
             except Exception as e:
                 RNS.log("pigeonhole: gc: %s" % e, RNS.LOG_ERROR)
+            if self._stop.wait(min(3600.0, self.engine.till_next_epoch() + 1)):
+                return
 
     def _announce_loop(self) -> None:
         while True:

@@ -147,6 +147,31 @@ and, through a bridge, equal to the mixnet's. A bridge adds
 Katzenpost replica on the same host, and `--mixnet <name>` and `--forward`
 (see Bridges).
 
+### Epochs and garbage collection
+
+Boxes are kept by replica epoch, as on Katzenpost replicas: an epoch is
+`--epoch-period` seconds (1200, Katzenpost's 20 minutes), a replica epoch
+is `--replica-epoch-epochs` of them (504, a week), both counted from
+2017-06-01 UTC. A box is stamped with the replica epoch it arrived in and
+kept for that epoch and the next, so one to two weeks; GC runs at start and
+at each replica epoch boundary. The bridge socket carries no timing and
+Katzenpost's replica epoch is fixed at a week, so a bridge should keep the
+defaults; it warns if it does not.
+
+### Storage limits
+
+Storage is optimistic: every box is stored while there is room.
+`--max-storage-mib` caps the box database and its WAL on disk (0, the
+default, for no cap), and `--min-free-storage-mib` keeps that much free on
+its filesystem (500 by default, as Katzenpost's `MinFreeStorageMiB`). A new
+box that would cross either limit first evicts the oldest boxes, by replica
+epoch then arrival, tombstones only after every box, until 1/16 of the limit
+is spare, and logs how many went. Only when nothing is left to evict is
+the write refused with `STORAGE_FULL`. Evicted pages are handed back to the
+filesystem (SQLite incremental vacuum and a WAL checkpoint), so the limits
+measure real disk use; an older store is vacuumed once on start to allow
+this.
+
 ## Check a replica
 
 These commands write and read single boxes, to test replicas:

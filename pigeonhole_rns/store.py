@@ -6,12 +6,20 @@ forwards is one commit."""
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Set, Tuple
 
+import RNS
+
 from . import wire
+
+# Boxes evicted per round when a storage limit is hit, before measuring again.
+EVICT_BATCH = 64
+# Eviction frees this share of a limit beyond it, so the next writes do not hit it again.
+HEADROOM = 1 / 16
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS boxes (
@@ -52,12 +60,33 @@ class Box:
 
 
 class Store:
-    def __init__(self, path: str):
+    """max_bytes bounds the database and its WAL on disk, and min_free_bytes
+    is the free space kept on its filesystem; zero disables either. When a
+    new box would pass a limit the oldest boxes are evicted, tombstones last,
+    and only when nothing is left to evict is the write refused."""
+
+    def __init__(self, path: str, max_bytes: int = 0, min_free_bytes: int = 0):
+        self.path = path
+        self.max_bytes = max_bytes
+        self.min_free_bytes = min_free_bytes
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._lock = threading.RLock()
         with self._lock:
+            # Incremental auto vacuum lets eviction hand pages back to the filesystem.
+            self._db.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            if self._db.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
+                try:
+                    self._db.execute("VACUUM")
+                except sqlite3.OperationalError as e:
+                    # Needs about the store's size free; without it eviction still reuses pages.
+                    RNS.log("pigeonhole: could not vacuum %s for auto vacuum: %s" % (path, e), RNS.LOG_WARNING)
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA synchronous=FULL")
+            # The WAL counts against max_bytes, so it is checkpointed within half the headroom.
+            page = self._db.execute("PRAGMA page_size").fetchone()[0]
+            wal_pages = min(1000, max(16, int(max_bytes * HEADROOM / 2 / page))) if max_bytes else 1000
+            self._db.execute("PRAGMA wal_autocheckpoint=%d" % wal_pages)
+            self._db.execute("PRAGMA journal_size_limit=%d" % (wal_pages * page))
             self._db.executescript(SCHEMA)
             if "origin" not in [r[1] for r in self._db.execute("PRAGMA table_info(boxes)")]:
                 self._db.execute("ALTER TABLE boxes ADD COLUMN origin BLOB NOT NULL DEFAULT x''")
@@ -65,6 +94,60 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._db.close()
+
+    # ---- disk use ----
+
+    def disk_bytes(self) -> int:
+        """The database and its WAL as they sit on disk."""
+        return sum(os.path.getsize(self.path + ext) for ext in ("", "-wal") if os.path.exists(self.path + ext))
+
+    def free_bytes(self) -> int:
+        st = os.statvfs(os.path.dirname(os.path.abspath(self.path)))
+        return st.f_bavail * st.f_frsize
+
+    def full(self, headroom: float = 0.0) -> bool:
+        return (self.max_bytes > 0 and self.disk_bytes() >= self.max_bytes * (1 - headroom)) or (
+            self.min_free_bytes > 0 and self.free_bytes() < self.min_free_bytes * (1 + headroom)
+        )
+
+    def _compact(self) -> None:
+        self._db.execute("PRAGMA incremental_vacuum").fetchall()  # one page per row stepped
+        self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def make_room(self, keep: bytes = b"") -> bool:
+        """Evicts the oldest boxes, by epoch then arrival and tombstones
+        last, until HEADROOM below every limit. Returns False if still full."""
+        with self._lock:
+            if not self.full():
+                return True
+            evicted = 0
+            while True:
+                self._compact()
+                if not self.full(HEADROOM):
+                    break
+                ids = [bytes(r[0]) for r in self._db.execute(
+                    "SELECT box_id FROM boxes WHERE box_id != ? ORDER BY length(payload) = 0, epoch, rowid LIMIT ?",
+                    (keep, EVICT_BATCH),
+                )]
+                if not ids:
+                    if not self.full():
+                        break
+                    RNS.log("pigeonhole: storage full with nothing left to evict (%d bytes on disk, %d free)"
+                            % (self.disk_bytes(), self.free_bytes()), RNS.LOG_ERROR)
+                    return False
+                self._delete(ids)
+                evicted += len(ids)
+            if evicted:
+                RNS.log("pigeonhole: storage limit hit, evicted %d oldest boxes (%d bytes on disk, %d free)"
+                        % (evicted, self.disk_bytes(), self.free_bytes()), RNS.LOG_WARNING)
+            return True
+
+    def _delete(self, ids: List[bytes]) -> None:
+        marks = ",".join("?" for _ in ids)
+        self._db.execute("BEGIN IMMEDIATE")
+        for table in ("boxes", "acks", "queue"):
+            self._db.execute("DELETE FROM %s WHERE box_id IN (%s)" % (table, marks), ids)
+        self._db.execute("COMMIT")
 
     # ---- boxes ----
 
@@ -82,8 +165,11 @@ class Store:
 
         Write once: the same bytes again is success, different bytes is
         ALREADY_EXISTS, a tombstone replaces whatever is there, and a box
-        never replaces a tombstone. Returns a wire code."""
+        never replaces a tombstone. A new box that finds no room after
+        eviction is STORAGE_FULL. Returns a wire code."""
         with self._lock:
+            if self.get(box_id) is None and not self.make_room(box_id):
+                return wire.STORAGE_FULL
             self._db.execute("BEGIN IMMEDIATE")
             try:
                 row = self._db.execute(
@@ -145,6 +231,7 @@ class Store:
             self._db.execute("DELETE FROM acks WHERE box_id NOT IN (SELECT box_id FROM boxes)")
             self._db.execute("DELETE FROM queue WHERE box_id NOT IN (SELECT box_id FROM boxes)")
             self._db.execute("COMMIT")
+            self._compact()
             return cur.rowcount
 
     # ---- forward queue and acknowledgements ----
