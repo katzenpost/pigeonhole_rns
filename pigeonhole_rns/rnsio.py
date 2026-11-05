@@ -42,7 +42,8 @@ class Links:
     lost. Requests on a link are serialised; the Link API carries payloads
     over the MDU as Resources by itself."""
 
-    def __init__(self, establish_timeout: float = 20.0, request_timeout: float = 60.0):
+    def __init__(self, establish_timeout: float = 20.0, request_timeout: float = 60.0, identity: Optional[RNS.Identity] = None):
+        self.identity = identity
         self.establish_timeout = establish_timeout
         self.request_timeout = request_timeout
         self._links: Dict[bytes, RNS.Link] = {}
@@ -80,6 +81,8 @@ class Links:
         if link.status != RNS.Link.ACTIVE:
             link.teardown()
             return None
+        if self.identity is not None:
+            link.identify(self.identity)
         with self._mu:
             self._links[dest] = link
         return link

@@ -106,6 +106,25 @@ def decode_reply(data: bytes) -> Reply:
     return Reply(code)
 
 
+# A sync page is a head, two 32 byte Box IDs for a query (the range it
+# covers, exclusive below, inclusive above) or one for a reply (where the
+# reply's page ends), then up to SYNC_PAGE entries of a Box ID and a byte, 1
+# for a tombstone.
+
+SYNC_PAGE = 128
+
+
+def encode_sync(head: bytes, entries) -> bytes:
+    return head + b"".join(box_id + bytes([tomb]) for box_id, tomb in entries)
+
+
+def decode_sync(data: bytes, head_len: int):
+    body, step = data[head_len:], BOX_ID_SIZE + 1
+    if len(data) < head_len or len(body) % step or len(body) // step > SYNC_PAGE:
+        raise WireError("bad sync page")
+    return bytes(data[:head_len]), [(bytes(body[i : i + BOX_ID_SIZE]), body[i + BOX_ID_SIZE] == 1) for i in range(0, len(body), step)]
+
+
 # The bridge socket carries each message as a big endian u32 length prefix
 # followed by the payload.
 

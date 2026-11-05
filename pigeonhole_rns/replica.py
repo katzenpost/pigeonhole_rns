@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: © 2026 David Stainton
 # SPDX-License-Identifier: AGPL-3.0-only
-"""The replica daemon: one Reticulum destination with three request paths,
-`write` and `read` for clients and `peek` for other replicas, the same
+"""The replica daemon: one Reticulum destination with four request paths,
+`write` and `read` for clients and `peek` and `sync` for other replicas, the same
 client queries as Channel frames (mode 2), and threads for forwarding,
 handoff, garbage collection and announcing."""
 
@@ -38,6 +38,7 @@ class Replica:
         forward_interval: float = 2.0,
         handoff_interval: float = 30.0,
         k: int = 2,
+        mode: str = engine.OPEN,
         loglevel: int = RNS.LOG_NOTICE,
     ):
         os.makedirs(storage_dir, exist_ok=True)
@@ -54,6 +55,7 @@ class Replica:
         self.destination.register_request_handler("write", response_generator=self._on_write, allow=RNS.Destination.ALLOW_ALL)
         self.destination.register_request_handler("read", response_generator=self._on_read, allow=RNS.Destination.ALLOW_ALL)
         self.destination.register_request_handler("peek", response_generator=self._on_peek, allow=RNS.Destination.ALLOW_ALL)
+        self.destination.register_request_handler("sync", response_generator=self._on_sync, allow=RNS.Destination.ALLOW_ALL)
         self.destination.set_link_established_callback(self._on_link)
 
         self.bridge = BridgeSocket(bridge_socket) if bridge_socket else None
@@ -70,8 +72,10 @@ class Replica:
             box_ciphertext_size=ciphertext_size,
             k=k,
             is_bridge=self.bridge is not None,
+            mode=mode,
         )
-        self.links = rnsio.Links()
+        # Links identify, so a replica can tell a forward's sender and not send the box back.
+        self.links = rnsio.Links(identity=self.identity)
         self.announce_interval = announce_interval
         self.forward_interval = forward_interval
         self.handoff_interval = handoff_interval
@@ -97,8 +101,14 @@ class Replica:
     def _reachable(self) -> list:
         return rnsio.reachable(d for d in self.engine.peers if d != self.engine.self_dest)
 
+    def _sender(self, remote_identity) -> Optional[bytes]:
+        return None if remote_identity is None else self.engine.peer_of(bytes(remote_identity.hash))
+
     def _on_write(self, path, data, request_id, link_id, remote_identity, requested_at):
-        return self.engine.handle_write(bytes(data), self._reachable())
+        return self.engine.handle_write(bytes(data), self._reachable(), self._sender(remote_identity))
+
+    def _on_sync(self, path, data, request_id, link_id, remote_identity, requested_at):
+        return self.engine.handle_sync(bytes(data), self._sender(remote_identity))
 
     def _on_peek(self, path, data, request_id, link_id, remote_identity, requested_at):
         return self.engine.handle_peek(bytes(data), self._bridge_read())
@@ -165,7 +175,9 @@ class Replica:
     def _handoff_loop(self) -> None:
         while not self._stop.wait(self.handoff_interval):
             try:
-                self.engine.handoff(self._reachable())
+                reachable = self._reachable()
+                self.engine.handoff(reachable)
+                self.engine.sync(reachable, lambda dst, q: self.links.request(dst, "sync", q))
             except Exception as e:
                 RNS.log("pigeonhole: handoff: %s" % e, RNS.LOG_ERROR)
 

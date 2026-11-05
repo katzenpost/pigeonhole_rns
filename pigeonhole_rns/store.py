@@ -122,6 +122,15 @@ class Store:
         with self._lock:
             return [bytes(r[0]) for r in self._db.execute("SELECT box_id FROM boxes")]
 
+    def entries(self, after: bytes, upto: bytes, limit: int) -> List[Tuple[bytes, bool]]:
+        """Box IDs in (after, upto], ascending, each with whether it is a tombstone."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT box_id, length(payload) = 0 FROM boxes WHERE box_id > ? AND box_id <= ? ORDER BY box_id LIMIT ?",
+                (after, upto, limit),
+            ).fetchall()
+        return [(bytes(r[0]), bool(r[1])) for r in rows]
+
     def sweep(self, keep_epochs: Iterable[int]) -> int:
         keep = list(keep_epochs)
         marks = ",".join("?" for _ in keep)
