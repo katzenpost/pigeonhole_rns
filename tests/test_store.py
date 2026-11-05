@@ -26,8 +26,6 @@ def test_tombstone_replaces_and_is_final(tmp_path):
     assert s.acked(box) == set(), "a tombstone starts its own acknowledgements"
     assert s.put(box, sig, ct, 7) == wire.ALREADY_EXISTS
     assert s.get(box).is_tombstone
-    s.drop(box)
-    assert s.get(box).is_tombstone, "tombstones are never dropped"
 
 
 def test_put_enqueues_atomically(tmp_path):

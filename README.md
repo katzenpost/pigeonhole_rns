@@ -12,7 +12,7 @@ boxes verified with `hpqc.bacap`, the same object the mixnet stores.
 
 ## Mesh modes
 
-**Open** (the default, `--mesh-mode open`): full replication, no sharding.
+**Open**: full replication, no sharding.
 Every replica stores every box. A replica that stores a new box, from a
 client, a forward, or a read, forwards it to every replica it has heard but
 the one it came from, retrying until each acknowledges; a box it already
@@ -27,9 +27,9 @@ to each other, so a forward's sender is known.
 the replicas a node has heard, two owners per box; an entry replica stores
 a client's write, acknowledges, and forwards along the box's order,
 standing in for owners it cannot reach and handing off, then dropping its
-copy, when it can. Reads walk the order past the owners. `--mesh-mode
-closed` runs this placement today, but a closed mesh also needs out of band
-authentication of its replicas, which is not implemented.
+copy, when it can. Reads walk the order past the owners. A closed mesh also
+needs out of band authentication of its replicas. Neither is implemented;
+the sharding code is kept on the branch `saved/closed-mode-sharding`.
 
 In both modes boxes crossing a bridge are sharded on the Katzenpost side,
 as the mixnet places them.

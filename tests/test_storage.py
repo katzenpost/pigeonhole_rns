@@ -5,7 +5,7 @@ import os
 import sqlite3
 
 from pigeonhole_rns import wire
-from pigeonhole_rns.engine import EPOCH_BASE, EPOCH_SECONDS, OPEN, Engine, epoch_now
+from pigeonhole_rns.engine import EPOCH_BASE, EPOCH_SECONDS, Engine, epoch_now
 from pigeonhole_rns.store import Store
 
 from test_engine import CT, IDS, ME, seal
@@ -19,7 +19,7 @@ def test_replica_epoch_matches_katzenpost():
 
 def test_gc_keeps_current_and_previous_epoch_across_boundaries(tmp_path):
     clock = [EPOCH_BASE + 10 * 3600.0]
-    e = Engine(Store(str(tmp_path / "e.sqlite")), ME, IDS[ME], box_ciphertext_size=CT, now=lambda: clock[0], mode=OPEN, epoch_seconds=3600)
+    e = Engine(Store(str(tmp_path / "e.sqlite")), ME, IDS[ME], box_ciphertext_size=CT, now=lambda: clock[0], epoch_seconds=3600)
     boxes = []
     for _ in range(2):
         _, box, sig, ct = seal()

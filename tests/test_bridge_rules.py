@@ -13,7 +13,7 @@ from hpqc.bacap.stateless import WriteCap
 from pigeonhole_rns import PIGEONHOLE_CTX, wire
 from pigeonhole_rns.bridge import BridgeSocket
 from pigeonhole_rns.client import pad, position
-from pigeonhole_rns.engine import BRIDGE, OPEN, Engine
+from pigeonhole_rns.engine import BRIDGE, Engine
 from pigeonhole_rns.store import Store
 
 BOX = 100
@@ -82,7 +82,7 @@ class Mesh:
         self.name = {d: n for n, d in dest.items()}
         for n, mx in nodes.items():
             self.e[n] = Engine(Store(str(tmp_path / (n + ".sqlite"))), dest[n], b"I" + dest[n], box_ciphertext_size=CT,
-                               is_bridge=mx is not None, now=lambda: self.clock[0], mode=OPEN,
+                               is_bridge=mx is not None, now=lambda: self.clock[0],
                                mixnet=wire.mixnet_id(mx.name) if mx else b"")
             if mx:
                 self.sock[n] = BridgeSocket(mx.path, conns=1)
@@ -101,7 +101,7 @@ class Mesh:
         for _ in range(rounds):
             for n, e in self.e.items():
                 src = self.dest[n]
-                e.handoff(self.reach(n))
+                e.handoff()
                 e.sync(self.reach(n), lambda dst, q, src=src: self.e[self.name[dst]].handle_sync(q, src))
                 e.forward_due(self.reach(n), lambda *a, n=n: self.deliver(n, *a), self.pushed)
             self.clock[0] += 700  # past the longest backoff

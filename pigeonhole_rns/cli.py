@@ -29,8 +29,6 @@ def main(argv=None) -> int:
     r.add_argument("--forward", choices=("all", "on-request"), default="all",
                    help="with --bridge-socket: write every box into the mixnet, or only those clients write to this replica")
     r.add_argument("--announce-interval", type=float, default=600.0)
-    r.add_argument("--mesh-mode", choices=("open", "closed"), default="open",
-                   help="open: every replica stores every box; closed: boxes sharded over two owners each, without the authentication a closed mesh will need")
 
     r.add_argument("--epoch-period", type=float, default=1200.0, help="seconds in an epoch, Katzenpost's 20 minutes by default")
     r.add_argument("--replica-epoch-epochs", type=int, default=504,
@@ -68,7 +66,7 @@ def main(argv=None) -> int:
     if a.cmd == "replica":
         from .replica import Replica
 
-        Replica(a.config, a.storage, a.box_size, bridge_socket=a.bridge_socket, announce_interval=a.announce_interval, mode=a.mesh_mode,
+        Replica(a.config, a.storage, a.box_size, bridge_socket=a.bridge_socket, announce_interval=a.announce_interval,
                 mixnet=a.mixnet, forward=a.forward, loglevel=loglevel, epoch_period=a.epoch_period,
                 replica_epoch_epochs=a.replica_epoch_epochs, max_storage_mib=a.max_storage_mib,
                 min_free_storage_mib=a.min_free_storage_mib).run_forever()
