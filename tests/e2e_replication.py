@@ -73,7 +73,11 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=240.0, help="seconds to wait for every replica to hold every box")
     ap.add_argument("--src", help="run the replicas from this source tree instead of this one")
     ap.add_argument("--replica-args", default="", help="extra arguments for the replica command")
+    ap.add_argument("--rust", default="", help="comma separated replica numbers to run with the Rust replica, e.g. 1,3")
+    ap.add_argument("--rust-bin", default="rust/target/release/replica_rns-rs", help="the Rust replica executable")
+    ap.add_argument("--rust-py", action="store_true", help="give the Rust replicas a Python Reticulum instance for Link requests (feature reticulum-py)")
     a = ap.parse_args()
+    rust = {int(i) for i in a.rust.split(",") if i}
     n, late, victim = a.n, a.n - 1, 1
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     src = os.path.abspath(a.src or here)
@@ -91,9 +95,18 @@ def main() -> int:
         with open(os.path.join(d, "config"), "w") as f:
             f.write(REPLICA_CFG % (a.port + i, "".join(TO % (j, a.port + j) for j in peers)))
         log = open(os.path.join(run, "replica-%d.log" % i), "a")
+        cmd = [os.path.abspath(a.rust_bin)] if i in rust else [sys.executable, "-m", "pigeonhole_rns.cli"]
+        extra = []
+        if i in rust and a.rust_py:
+            # The Python instance reaches the mesh through the Rust replica's own listener.
+            pd = os.path.join(run, "rns-py-%d" % i)
+            os.makedirs(pd, exist_ok=True)
+            with open(os.path.join(pd, "config"), "w") as f:
+                f.write(CLIENT_CFG % (TO % (i, a.port + i)))
+            extra = ["--py-config", pd]
         procs[i] = subprocess.Popen(
-            [sys.executable, "-m", "pigeonhole_rns.cli", "--config", d, "--box-size", str(BOX), "replica",
-             "--storage", store(i), "--announce-interval", "5"] + a.replica_args.split(),
+            cmd + ["--config", d, "--box-size", str(BOX), "replica",
+             "--storage", store(i), "--announce-interval", "5"] + extra + a.replica_args.split(),
             stdout=log, stderr=subprocess.STDOUT, cwd=src, env=dict(os.environ, PYTHONPATH=src))
         time.sleep(1.0)
 

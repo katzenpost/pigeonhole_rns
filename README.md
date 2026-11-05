@@ -172,6 +172,33 @@ filesystem (SQLite incremental vacuum and a WAL checkpoint), so the limits
 measure real disk use; an older store is vacuumed once on start to allow
 this.
 
+## The Rust replica
+
+`rust/` is the same replica in Rust on
+[Reticulum-rs](https://github.com/BeechatNetworkSystemsLtd/Reticulum-rs), at
+the revision `katzenpost/pigeonhole_protocols` uses, with BACAP from the Rust
+`hpqc`. It keeps the store (the same SQLite file), open and closed mesh
+modes, sync, the bridge and its rules, the identity file and the command
+line, and reads the TCP and UDP interfaces and `enable_transport` of a
+Reticulum config file. Reticulum-rs has Links and Channel but no Link
+requests or Resources, so it speaks mode 2 alone, to clients and replicas,
+and announces bits 1, 2 and 3; Python replicas ask it in mode 2.
+
+    cd rust && cargo build --release
+    rust/target/release/replica_rns-rs --config ~/.reticulum --box-size 1000 replica --storage ~/pigeonhole
+
+It asks other replicas in mode 2, so reaches those announcing bit 2. With the
+optional feature `reticulum-py` it also falls back to Link requests and
+Resources through Python RNS, embedded, for replicas that do not announce bit
+2 or when mode 2 fails, as Python replicas do:
+
+    cd rust && PYO3_PYTHON=$(which python) cargo build --release --features reticulum-py
+    rust/target/release/replica_rns-rs --config ~/.reticulum replica --storage ~/pigeonhole --py-config ~/.reticulum-py
+
+`--py-config` is the config directory of the Python Reticulum instance, with
+interfaces of its own, such as a TCP client of this replica's listener; RNS
+and this package must be importable by that Python.
+
 ## Check a replica
 
 These commands write and read single boxes, to test replicas:
@@ -190,7 +217,8 @@ These commands write and read single boxes, to test replicas:
 `tests/e2e_replication.py` (`-n 5 --topo line`, say) starts N replicas in a
 mesh or a line, holds the last back until boxes are written, stops replica 1
 while more are written, then tombstones half, and passes when every replica
-holds every box or its tombstone.
+holds every box or its tombstone. `--rust 1,3` runs those replicas with the
+Rust replica (`--rust-bin`, by default `rust/target/release/replica_rns-rs`).
 
 The end to end test starts two replica processes on a local TCP interface
 and drives a client through write, read, forward, delete and tombstone in
