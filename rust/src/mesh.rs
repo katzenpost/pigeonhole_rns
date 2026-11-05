@@ -106,9 +106,10 @@ impl Mesh {
         got
     }
 
+    /// Reticulum-rs's `link_close` finds out-links by destination, not by Link id, so it closes
+    /// none; marking ours closed makes `Transport::link` open a new one and drop this one.
     async fn close(&self, link: &Mutex<Link>) {
-        let id = *link.lock().await.id();
-        let _ = self.t.link_close(id).await;
+        link.lock().await.set_status(LinkStatus::Closed);
     }
 
     async fn conn(&self, dest: AddressHash) -> Option<Arc<Conn>> {
@@ -125,7 +126,9 @@ impl Mesh {
         let link = self.t.link(desc).await;
         let deadline = Instant::now() + ESTABLISH_TIMEOUT;
         loop {
-            match link.lock().await.status() {
+            // Not in the match: its guard would live through the arms, and close() locks again.
+            let status = link.lock().await.status();
+            match status {
                 LinkStatus::Active => break,
                 LinkStatus::Closed => return None,
                 _ if Instant::now() > deadline => {
