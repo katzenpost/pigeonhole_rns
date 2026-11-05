@@ -7,7 +7,7 @@ from hpqc.bacap.stateless import WriteCap
 
 from pigeonhole_rns import PIGEONHOLE_CTX, placement, wire
 from pigeonhole_rns.client import pad, position
-from pigeonhole_rns.engine import BRIDGE, Engine
+from pigeonhole_rns.engine import BRIDGE, CLOSED, OPEN, Engine
 from pigeonhole_rns.store import Store
 
 BOX = 100
@@ -17,9 +17,10 @@ ME, R2, R3, R4 = b"me" * 8, b"r2" * 8, b"r3" * 8, b"r4" * 8
 IDS = {ME: b"I" + ME, R2: b"I" + R2, R3: b"I" + R3, R4: b"I" + R4}
 
 
-def engine(tmp_path, is_bridge=False, peers=(R2, R3, R4)):
+# The tests below default to closed mode, which shards; the open mode tests are at the end.
+def engine(tmp_path, is_bridge=False, peers=(R2, R3, R4), mode=CLOSED, me=ME, name="e"):
     clock = [1000.0]
-    e = Engine(Store(str(tmp_path / "e.sqlite")), ME, IDS[ME], box_ciphertext_size=CT, is_bridge=is_bridge, now=lambda: clock[0])
+    e = Engine(Store(str(tmp_path / (name + ".sqlite"))), me, IDS[me], box_ciphertext_size=CT, is_bridge=is_bridge, now=lambda: clock[0], mode=mode)
     e.clock = clock
     for p in peers:
         e.heard(p, IDS[p], False)
@@ -206,3 +207,87 @@ def test_bridge_replica_keeps_copy_until_pushed(tmp_path):
     e.clock[0] += 3600
     e.forward_due(owners, lambda dst, b, s, c: wire.SUCCESS)
     assert e.handoff(reachable=owners) == 1
+
+
+# ---- open mode: every replica stores every box ----
+
+
+def test_open_write_goes_to_every_replica_but_the_sender(tmp_path):
+    e = engine(tmp_path, mode=OPEN)
+    e.heard(R5, IDS[R5], True)
+    _, box, sig, ct = seal()
+    e.handle_write(wire.encode_write(box, sig, ct), reachable=[R2, R3, R4, R5], sender=R3)
+    assert e.store.queued(box) == {R2, R4, R5}
+    e.forward_due([R2, R3, R4, R5], lambda dst, b, s, c: wire.SUCCESS)
+    assert e.store.queued(box) == set()
+    assert e.handoff(reachable=[R2, R3, R4, R5]) == 0
+    assert e.store.get(box) is not None, "open mode never drops for placement"
+    assert e.handle_write(wire.encode_write(box, sig, ct), [R2, R3, R4, R5], sender=R2) == bytes([wire.SUCCESS])
+    assert e.store.queued(box) == set(), "a box already held is not passed on again"
+
+
+def test_open_bridge_replica_pushes_to_mixnet(tmp_path):
+    e = engine(tmp_path, is_bridge=True, mode=OPEN)
+    _, box, sig, ct = seal()
+    e.handle_write(wire.encode_write(box, sig, ct), reachable=[R2], sender=R2)
+    assert e.store.queued(box) == {BRIDGE}
+
+
+def pair(tmp_path, monkeypatch):
+    """Two open replicas whose sync and forwards call each other in process."""
+    monkeypatch.setattr(wire, "SYNC_PAGE", 2)
+    a = engine(tmp_path, peers=(R2,), mode=OPEN, name="a")
+    b = engine(tmp_path, peers=(ME,), mode=OPEN, me=R2, name="b")
+    eng = {ME: a, R2: b}
+    sender = {ME: R2, R2: ME}
+
+    def request(dst, q):
+        return eng[dst].handle_sync(q, sender[dst])
+
+    def deliver_from(src):
+        return lambda dst, box_id, s, c: wire.decode_reply(eng[dst].handle_write(wire.encode_write(box_id, s, c), [], src)).code
+
+    def run():
+        a.sync([R2], request)
+        b.sync([ME], request)
+        a.forward_due([R2], deliver_from(ME))
+        b.forward_due([ME], deliver_from(R2))
+
+    return a, b, run
+
+
+def test_open_sync_pages_both_ways_and_tombstones_win(tmp_path, monkeypatch):
+    a, b, run = pair(tmp_path, monkeypatch)
+    boxes = [seal(b"%d" % i) for i in range(7)]
+    for i, (_, box, sig, ct) in enumerate(boxes):
+        (a if i % 2 else b).accept(wire.Query(wire.WRITE, box, sig, ct), [])
+    # Both hold box 0; a holds its tombstone.
+    cap, box0, sig0, ct0 = boxes[0]
+    a.accept(wire.Query(wire.WRITE, box0, sig0, ct0), [])
+    tid, tsig = position(cap, 0).tombstone(PIGEONHOLE_CTX)
+    assert a.accept(wire.Query(wire.WRITE, tid, tsig, b""), []) == wire.SUCCESS
+    run()
+    ids = {box for _, box, _, _ in boxes}
+    for e in (a, b):
+        assert set(e.store.box_ids()) == ids
+        assert e.store.get(box0).is_tombstone
+    assert a.synced == {R2} and b.synced == {ME}
+    assert a.store.due(1e9) == [] and b.store.due(1e9) == []
+
+
+def test_open_resyncs_after_peer_was_unreachable(tmp_path, monkeypatch):
+    a, b, run = pair(tmp_path, monkeypatch)
+    run()
+    _, box, sig, ct = seal()
+    b.accept(wire.Query(wire.WRITE, box, sig, ct), [])  # written while a was away
+    a.sync([], lambda d, q: None)
+    assert a.synced == set()
+    run()
+    assert a.store.get(box) is not None
+
+
+def test_sync_rejects_out_of_range_reply(tmp_path):
+    e = engine(tmp_path, mode=OPEN)
+    bad = wire.encode_sync(b"\x00" * 32, [])  # ends at the bottom, no progress
+    assert e.sync([R2], lambda d, q: bad) == 0 and e.synced == set()
+    assert engine(tmp_path, mode=CLOSED, name="c").handle_sync(wire.encode_sync(bytes(32) + b"\xff" * 32, []), R2) == b""

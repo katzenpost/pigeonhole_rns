@@ -1,8 +1,13 @@
 # SPDX-FileCopyrightText: © 2026 David Stainton
 # SPDX-License-Identifier: AGPL-3.0-only
 """The replica's decisions, free of Reticulum so they can be tested in
-process: membership, placement, the entry path, forwarding, handoff, the
-read walk and the bridge."""
+process: membership, placement, the entry path, forwarding, handoff, sync,
+the read walk and the bridge.
+
+In open mode every replica stores every box: a new box goes to every replica
+heard, and replicas that meet sync the boxes the other lacks. Closed mode,
+for a future mesh whose replicas authenticate out of band, shards: two
+owners per box by rendezvous hashing, and stand-ins hand off and drop."""
 
 from __future__ import annotations
 
@@ -27,6 +32,11 @@ EPOCH_BASE = 1496275200
 BACKOFF_BASE = 5.0
 BACKOFF_CAP = 600.0
 
+OPEN = "open"
+CLOSED = "closed"
+
+LOW, HIGH = bytes(32), b"\xff" * 32
+
 
 def epoch_now(now: Optional[float] = None) -> int:
     return int(((time.time() if now is None else now) - EPOCH_BASE) // EPOCH_SECONDS)
@@ -41,6 +51,7 @@ class Peer:
 
 # Callbacks the Reticulum layer supplies.
 Deliver = Callable[[bytes, bytes, bytes, bytes], Optional[int]]  # (dst, box_id, sig, ct) -> code or None
+Request = Callable[[bytes, bytes], Optional[bytes]]  # (dst, sync query) -> reply or None
 Peek = Callable[[bytes, bytes], Optional[wire.Reply]]  # (dst, box_id) -> reply or None on no answer
 BridgeRead = Callable[[bytes], Optional[wire.Reply]]  # (box_id) -> reply or None
 
@@ -55,7 +66,12 @@ class Engine:
         k: int = placement.K,
         is_bridge: bool = False,
         now: Callable[[], float] = time.time,
+        mode: str = OPEN,
     ):
+        if mode not in (OPEN, CLOSED):
+            raise ValueError("mode must be open or closed")
+        self.mode = mode
+        self.synced: Set[bytes] = set()
         self.store = store
         self.self_dest = self_dest
         self.k = k
@@ -78,12 +94,27 @@ class Engine:
     def identity_of(self, dest: bytes) -> bytes:
         return self.peers[dest].identity
 
+    def peer_of(self, identity: bytes) -> Optional[bytes]:
+        return next((d for d, p in self.peers.items() if p.identity == identity and d != self.self_dest), None)
+
     def owners(self, box_id: bytes) -> List[bytes]:
         return placement.first(box_id, self.peers.keys(), self.identity_of, self.k)
 
     def targets(self, box_id: bytes, reachable: Iterable[bytes]) -> List[bytes]:
         cands = set(reachable) | {self.self_dest}
         return placement.first(box_id, cands, self.identity_of, self.k)
+
+    def forwards(self, box_id: bytes, reachable: Iterable[bytes], sender: Optional[bytes] = None) -> List[bytes]:
+        """Where a newly stored box is sent: in open mode every reachable
+        replica heard, in closed mode the first k in its order; and a
+        bridge. Never back to the replica it came from."""
+        reachable = list(reachable)
+        if self.mode == OPEN:
+            dsts = [d for d in reachable if d in self.peers]
+        else:
+            dsts = self.targets(box_id, reachable)
+        dsts += self.bridge_targets(box_id, reachable)
+        return list(dict.fromkeys(d for d in dsts if d not in (self.self_dest, sender)))
 
     def bridges(self, reachable: Iterable[bytes]) -> List[bytes]:
         return [d for d in reachable if d in self.peers and self.peers[d].bridge and d != self.self_dest]
@@ -114,24 +145,23 @@ class Engine:
 
     # ---- the entry path ----
 
-    def accept(self, q: wire.Query, reachable: Iterable[bytes]) -> int:
-        """Verify, store, and enqueue forwards to the first k reachable in
-        the box's order and to a bridge."""
+    def accept(self, q: wire.Query, reachable: Iterable[bytes], sender: Optional[bytes] = None) -> int:
+        """Verify, store, and enqueue forwards. A box already held enqueues
+        nothing, so a forward is never passed on twice."""
         code = self.verify(q)
         if code != wire.SUCCESS:
             return code
-        dsts = [d for d in self.targets(q.box_id, reachable) if d != self.self_dest]
-        dsts += self.bridge_targets(q.box_id, reachable)
+        dsts = self.forwards(q.box_id, reachable, sender)
         return self.store.put(q.box_id, q.signature, q.ciphertext, epoch_now(self.now()), dsts)
 
-    def handle_write(self, data: bytes, reachable: Iterable[bytes]) -> bytes:
+    def handle_write(self, data: bytes, reachable: Iterable[bytes], sender: Optional[bytes] = None) -> bytes:
         try:
             q = wire.decode_query(data)
         except wire.WireError:
             return wire.encode_reply(wire.INVALID_PAYLOAD)
         if q.kind != wire.WRITE:
             return wire.encode_reply(wire.INVALID_PAYLOAD)
-        return wire.encode_reply(self.accept(q, reachable))
+        return wire.encode_reply(self.accept(q, reachable, sender))
 
     # ---- reads ----
 
@@ -202,9 +232,7 @@ class Engine:
         if r.code == wire.SUCCESS and r.signature is not None:
             q = wire.Query(wire.WRITE, box_id, r.signature, r.ciphertext or b"")
             if self.verify(q) == wire.SUCCESS:
-                dsts = [d for d in self.targets(box_id, reachable) if d != self.self_dest]
-                dsts += self.bridge_targets(box_id, reachable)
-                self.store.put(box_id, r.signature, r.ciphertext or b"", epoch_now(self.now()), dsts)
+                self.store.put(box_id, r.signature, r.ciphertext or b"", epoch_now(self.now()), self.forwards(box_id, reachable))
 
     # ---- forwarding and handoff ----
 
@@ -235,9 +263,10 @@ class Engine:
 
     def handoff(self, reachable: Iterable[bytes]) -> int:
         """For every held box: enqueue to a bridge if none has taken it yet.
-        For one whose owners, in this replica's view, do not include it:
-        enqueue to owners not yet acknowledged, and drop the copy once both
-        owners and the bridge, if one is queued, have acknowledged.
+        Open mode stops there. In closed mode, for one whose owners, in this
+        replica's view, do not include it: enqueue to owners not yet
+        acknowledged, and drop the copy once both owners and the bridge, if
+        one is queued, have acknowledged.
         Tombstones are never dropped. Returns how many copies were dropped."""
         reachable = set(reachable)
         dropped = 0
@@ -248,6 +277,8 @@ class Engine:
                 for bdst in self.bridge_targets(box_id, reachable):
                     self.store.enqueue(box_id, bdst)
                     queued.add(bdst)
+            if self.mode == OPEN:
+                continue
             owners = self.owners(box_id)
             if self.self_dest in owners:
                 continue
@@ -262,6 +293,71 @@ class Engine:
                 self.store.drop(box_id)
                 dropped += 1
         return dropped
+
+    # ---- sync, open mode ----
+
+    def sync(self, reachable: Iterable[bytes], request: Request) -> int:
+        """Syncs with each reachable replica not synced with since this
+        replica started or last found it unreachable. Returns how many
+        synced."""
+        if self.mode != OPEN:
+            return 0
+        reachable = {d for d in reachable if d in self.peers and d != self.self_dest}
+        self.synced &= reachable
+        done = 0
+        for dst in reachable - self.synced:
+            if self._sync_with(dst, request):
+                self.synced.add(dst)
+                done += 1
+        return done
+
+    def _sync_with(self, dst: bytes, request: Request) -> bool:
+        """Walks the Box ID space a page at a time: sends this store's page,
+        the peer enqueues what this store lacks and answers with its own, and
+        this store enqueues what the peer lacks."""
+        cursor = LOW
+        while cursor != HIGH:
+            mine = self.store.entries(cursor, HIGH, wire.SYNC_PAGE)
+            hi = mine[-1][0] if len(mine) == wire.SYNC_PAGE else HIGH
+            raw = request(dst, wire.encode_sync(cursor + hi, mine))
+            if raw is None:
+                return False
+            try:
+                top, theirs = wire.decode_sync(raw, wire.BOX_ID_SIZE)
+            except wire.WireError:
+                return False
+            if not cursor < top <= hi or any(not cursor < b <= top for b, _ in theirs):
+                return False
+            self._push_missing(dst, [e for e in mine if e[0] <= top], theirs)
+            cursor = top
+        return True
+
+    def handle_sync(self, data: bytes, sender: Optional[bytes]) -> bytes:
+        """Answers a sync page with this store's page over the same range,
+        cut short if full, and enqueues to the sender what it lacks there.
+        An unidentified sender gets the answer but no pushes."""
+        try:
+            head, theirs = wire.decode_sync(data, 2 * wire.BOX_ID_SIZE)
+        except wire.WireError:
+            return b""
+        cursor, hi = head[: wire.BOX_ID_SIZE], head[wire.BOX_ID_SIZE :]
+        if self.mode != OPEN or not cursor < hi:
+            return b""
+        mine = self.store.entries(cursor, hi, wire.SYNC_PAGE)
+        top = mine[-1][0] if len(mine) == wire.SYNC_PAGE else hi
+        if sender is not None:
+            self._push_missing(sender, mine, theirs)
+        return wire.encode_sync(top, mine)
+
+    def _push_missing(self, dst: bytes, mine, theirs) -> None:
+        """Enqueues to dst each of mine it lacks, or holds as a box where
+        this store holds the tombstone."""
+        # shortcut: the receiver stores a push at its own epoch, so a sync across an epoch
+        # boundary can keep a box an epoch longer; carry the epoch in replica writes if it matters.
+        have = dict(theirs)
+        for box_id, tomb in mine:
+            if box_id not in have or (tomb and not have[box_id]):
+                self.store.enqueue(box_id, dst)
 
     def gc(self) -> int:
         cur = epoch_now(self.now())

@@ -7,12 +7,32 @@ Pigeonhole is the protocol; clients live elsewhere, such as the group chat
 client [katzenrns](https://github.com/katzenpost/katzenrns). The design is the Pigeonhole over Reticulum specification on the
 Katzenpost website; this is its open mesh profile.
 
-A replica is any node that announces `pigeonhole.replica`. Boxes are placed
-by rendezvous hashing over the replicas a node has heard, two owners per
-box; an entry replica stores a client's write, acknowledges, and forwards
-along the box's order, standing in for owners it cannot reach and handing
-off when it can. Reads walk the order past the owners. Boxes are BACAP boxes
-verified with `hpqc.bacap`, the same object the mixnet stores.
+A replica is any node that announces `pigeonhole.replica`. Boxes are BACAP
+boxes verified with `hpqc.bacap`, the same object the mixnet stores.
+
+## Mesh modes
+
+**Open** (the default, `--mesh-mode open`): full replication, no sharding.
+Every replica stores every box. A replica that stores a new box, from a
+client, a forward, or a read, forwards it to every replica it has heard but
+the one it came from, retrying until each acknowledges; a box it already
+holds is not passed on again. When a replica first hears another, and again
+after it was unreachable or either restarted, the two sync: they walk the
+Box ID space in pages of up to 128 IDs, each side enqueues for the other the
+boxes it lacks, and a tombstone wins over the box it replaces. Reads are
+served from the local store first. Replicas identify on the Links they open
+to each other, so a forward's sender is known.
+
+**Closed** (future): sharded. Boxes are placed by rendezvous hashing over
+the replicas a node has heard, two owners per box; an entry replica stores
+a client's write, acknowledges, and forwards along the box's order,
+standing in for owners it cannot reach and handing off, then dropping its
+copy, when it can. Reads walk the order past the owners. `--mesh-mode
+closed` runs this placement today, but a closed mesh also needs out of band
+authentication of its replicas, which is not implemented.
+
+In both modes boxes crossing a bridge are sharded on the Katzenpost side,
+as the mixnet places them.
 
 The mixnet half of the bridge, a unix socket on the Katzenpost replica, is in
 the Katzenpost repository (`replica/bridge.go`).
@@ -21,11 +41,12 @@ the Katzenpost repository (`replica/bridge.go`).
 
 A client opens a Link to a replica's `pigeonhole.replica` destination and
 sends each query in one of two modes. Both carry the same query and reply
-bytes (`wire.py`) and one destination serves both.
+bytes (`wire.py`) and one destination serves both. Replicas also use paths
+`peek` and `sync` between themselves.
 
 1. **Requests.** Each query is a Link request to path `write` or `read`;
-   one over the Link MDU travels as a Resource. Replicas also ask each other
-   on path `peek`, which exists only in this mode.
+   one over the Link MDU travels as a Resource. The replica paths exist only
+   in this mode.
 2. **Channel.** Each query and reply is a run of Channel messages on the
    Link, for Reticulum stacks with Links and Channel but no Link requests
    or Resources. The query's first byte, 0 read or 1 write, picks the
@@ -101,6 +122,11 @@ These commands write and read single boxes, to test replicas:
     pytest
     python tests/e2e_two_replicas.py --run-dir /some/scratch/dir
     python tests/e2e_two_replicas.py --run-dir /some/scratch/dir --box-size 1000 --mtu-discovery no
+
+`tests/e2e_replication.py` (`-n 5 --topo line`, say) starts N replicas in a
+mesh or a line, holds the last back until boxes are written, stops replica 1
+while more are written, then tombstones half, and passes when every replica
+holds every box or its tombstone.
 
 The end to end test starts two replica processes on a local TCP interface
 and drives a client through write, read, forward, delete and tombstone in

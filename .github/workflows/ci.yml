@@ -22,6 +22,8 @@ jobs:
         run: python tests/e2e_two_replicas.py --run-dir "$RUNNER_TEMP/e2e"
       - name: The same at the 500 byte link MTU, 1000 byte boxes, multi-piece Channel frames
         run: python tests/e2e_two_replicas.py --run-dir "$RUNNER_TEMP/e2e500" --box-size 1000 --mtu-discovery no
+      - name: Open mode, five replicas in a line, one late and one restarted
+        run: python tests/e2e_replication.py --run-dir "$RUNNER_TEMP/repl" -n 5 --topo line
 
   # The bridge socket's wire format is shared with the Katzenpost replica: the
   # vectors here and in katzenpost's replica/testdata must be the same file.
