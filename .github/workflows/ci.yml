@@ -25,6 +25,31 @@ jobs:
       - name: Open mode, five replicas in a line, one late and one restarted
         run: python tests/e2e_replication.py --run-dir "$RUNNER_TEMP/repl" -n 5 --topo line
 
+  # The Rust replica on Reticulum-rs, and Python and Rust replicas replicating together.
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y gcc
+      - run: pip install -e .[test]
+      - run: cd rust && cargo clippy --release --all-targets -- -D warnings
+      - run: cd rust && cargo test --release
+      - run: cd rust && cargo build --release
+      - run: cd rust && PYO3_PYTHON="$(which python)" cargo clippy --release --all-targets --features reticulum-py -- -D warnings
+      - name: Open mode, Python replicas 0 and 2 and Rust replicas 1 and 3 in a mesh, Rust replica 1 restarted
+        run: python tests/e2e_replication.py --run-dir "$RUNNER_TEMP/rmesh" -n 4 --topo mesh --rust 1,3
+      - name: The same, five in a line, Rust replicas 1 and 3 between Python ones
+        run: python tests/e2e_replication.py --run-dir "$RUNNER_TEMP/rline" -n 5 --topo line --rust 1,3
+      - name: Rust replicas alone, four in a line
+        run: python tests/e2e_replication.py --run-dir "$RUNNER_TEMP/rrust" -n 4 --topo line --rust 0,1,2,3
+
   # The bridge socket's wire format is shared with the Katzenpost replica: the
   # vectors here and in katzenpost's replica/testdata must be the same file.
   vectors:
