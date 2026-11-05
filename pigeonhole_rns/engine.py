@@ -18,6 +18,7 @@ before writing, so each box goes to each mixnet once, barring retries."""
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Set
 
@@ -289,25 +290,39 @@ class Engine:
         answer. Before writing into its mixnet, a bridge asks the others
         serving it; one has written the box, and this one acknowledges it
         as written, or this one is first in the box's order among them, or
-        has waited TWIN_WAIT retries, and writes it. Returns how many were
-        acknowledged."""
+        has waited TWIN_WAIT retries, and writes it. Destinations are served
+        at once, each on its own thread and in queue order; one that does
+        not answer is not tried again this round, its other forwards backing
+        off untried. Returns how many were acknowledged."""
         reachable = set(reachable)
         now = self.now()
-        done = 0
+        by_dst: Dict[bytes, list] = {}
         for box_id, dst, attempts in self.store.due(now):
-            if dst != BRIDGE and dst not in reachable:
-                continue
+            if dst == BRIDGE or dst in reachable:
+                by_dst.setdefault(dst, []).append((box_id, attempts))
+        if len(by_dst) <= 1:
+            return sum(self._forward_to(dst, items, reachable, deliver, pushed, now) for dst, items in by_dst.items())
+        with ThreadPoolExecutor(len(by_dst)) as ex:
+            return sum(ex.map(lambda kv: self._forward_to(kv[0], kv[1], reachable, deliver, pushed, now), by_dst.items()))
+
+    def _forward_to(self, dst: bytes, items, reachable: Set[bytes], deliver: Deliver, pushed: Optional[Pushed], now: float) -> int:
+        done = 0
+        silent = False
+        for box_id, attempts in items:
             box = self.store.get(box_id)
             if box is None:
                 self.store.forget(box_id, dst)
                 continue
-            twins = self.twins(reachable) if dst == BRIDGE and pushed is not None else []
-            if twins and any(pushed(t, box_id, box.is_tombstone) for t in twins):
+            twins = self.twins(reachable) if dst == BRIDGE and pushed is not None and not silent else []
+            if silent:
+                code = None
+            elif twins and any(pushed(t, box_id, box.is_tombstone) for t in twins):
                 code = wire.SUCCESS
             elif twins and attempts < TWIN_WAIT and placement.order(box_id, twins + [self.self_dest], self.identity_of)[0] != self.self_dest:
                 code = None
             else:
                 code = deliver(dst, box_id, box.signature, box.payload, box.origin)
+                silent = code is None
             if code is not None and code in wire.STORED_CODES:
                 self.store.ack(box_id, dst)
                 done += 1

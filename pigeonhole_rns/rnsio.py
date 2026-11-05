@@ -6,7 +6,6 @@ replica destination, keeping a Link to it, and making a request on it."""
 from __future__ import annotations
 
 import threading
-import time
 from typing import Dict, Optional
 
 import RNS
@@ -46,15 +45,18 @@ def hops(dest: bytes) -> int:
 
 class Links:
     """One Link per replica destination, opened on demand and reopened when
-    lost. Requests on a link are serialised; the Link API carries payloads
-    over the MDU as Resources by itself."""
+    lost. Callers on several threads have up to window queries in flight
+    per Link at once, under a replica's per Link queue in mode 2; the Link
+    API carries payloads over the MDU as Resources by itself."""
 
-    def __init__(self, establish_timeout: float = 20.0, request_timeout: float = 60.0, identity: Optional[RNS.Identity] = None):
+    def __init__(self, establish_timeout: float = 20.0, request_timeout: float = 60.0, identity: Optional[RNS.Identity] = None, window: int = 8):
         self.identity = identity
+        self.window = window
         self.establish_timeout = establish_timeout
         self.request_timeout = request_timeout
         self._links: Dict[bytes, RNS.Link] = {}
         self._locks: Dict[bytes, threading.Lock] = {}
+        self._windows: Dict[bytes, threading.BoundedSemaphore] = {}
         self._mu = threading.Lock()
         self._endpoints: Dict[bytes, channel.Endpoint] = {}
         self._replies: Dict[int, list] = {}
@@ -64,6 +66,14 @@ class Links:
         with self._mu:
             return self._locks.setdefault(dest, threading.Lock())
 
+    def _window(self, dest: bytes) -> threading.BoundedSemaphore:
+        with self._mu:
+            return self._windows.setdefault(dest, threading.BoundedSemaphore(self.window))
+
+    def _open(self, dest: bytes) -> Optional[RNS.Link]:
+        with self._lock(dest):
+            return self._link(dest)
+
     def _link(self, dest: bytes) -> Optional[RNS.Link]:
         with self._mu:
             link = self._links.get(dest)
@@ -71,20 +81,14 @@ class Links:
             return link
         identity = RNS.Identity.recall(dest)
         if identity is None:
-            RNS.Transport.request_path(dest)
-            deadline = time.time() + self.establish_timeout
-            while identity is None and time.time() < deadline:
-                time.sleep(0.2)
-                identity = RNS.Identity.recall(dest)
+            RNS.Transport.await_path(dest, self.establish_timeout)
+            identity = RNS.Identity.recall(dest)
             if identity is None:
                 return None
         destination = RNS.Destination(identity, RNS.Destination.OUT, RNS.Destination.SINGLE, APP_NAME, ASPECT)
-        link = RNS.Link(destination)
-        deadline = time.time() + self.establish_timeout
-        while link.status != RNS.Link.ACTIVE and time.time() < deadline:
-            if link.status == RNS.Link.CLOSED:
-                return None
-            time.sleep(0.1)
+        settled = threading.Event()
+        link = RNS.Link(destination, established_callback=lambda _l: settled.set(), closed_callback=lambda _l: settled.set())
+        settled.wait(self.establish_timeout)
         if link.status != RNS.Link.ACTIVE:
             link.teardown()
             return None
@@ -96,16 +100,15 @@ class Links:
 
     def request(self, dest: bytes, path: str, data: bytes) -> Optional[bytes]:
         """Returns the reply bytes, or None when the replica did not answer."""
-        with self._lock(dest):
-            link = self._link(dest)
+        with self._window(dest):
+            link = self._open(dest)
             if link is None:
                 return None
-            receipt = link.request(path, data, timeout=self.request_timeout)
+            done = threading.Event()
+            receipt = link.request(path, data, response_callback=lambda _r: done.set(), failed_callback=lambda _r: done.set(), timeout=self.request_timeout)
             if receipt is False or receipt is None:
                 return None
-            deadline = time.time() + self.request_timeout
-            while receipt.status not in (RNS.RequestReceipt.READY, RNS.RequestReceipt.FAILED) and time.time() < deadline:
-                time.sleep(0.05)
+            done.wait(self.request_timeout)
             if receipt.status != RNS.RequestReceipt.READY:
                 return None
             resp = receipt.response
@@ -113,8 +116,8 @@ class Links:
 
     def channel_request(self, dest: bytes, data: bytes) -> Optional[bytes]:
         """Query mode 2: the same bytes as request(), as Channel frames."""
-        with self._lock(dest):
-            link = self._link(dest)
+        with self._window(dest):
+            link = self._open(dest)
             if link is None:
                 return None
             with self._mu:
