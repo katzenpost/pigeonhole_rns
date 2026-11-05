@@ -67,7 +67,9 @@ the Katzenpost repository (`replica/bridge.go`).
 A client opens a Link to a replica's `pigeonhole.replica` destination and
 sends each query in one of two modes. Both carry the same query and reply
 bytes (`wire.py`) and one destination serves both. Replicas also use paths
-`peek`, `sync`, `forward` and `pushed` between themselves.
+`peek`, `sync`, `forward` and `pushed` between themselves. The client keeps
+up to 8 queries in flight per Link, from callers on several threads, under
+a replica's mode 2 queue of 16.
 
 1. **Requests.** Each query is a Link request to path `write` or `read`;
    one over the Link MDU travels as a Resource. The replica paths exist only
@@ -116,7 +118,9 @@ Link packet bytes sent and received by a client for one 1000 byte box (a
 | 16384 | read  | 131 / 1187 | 250 / 1306 |
 
 At 500 bytes mode 1 sends a Resource (advertisement, parts, proof) and
-mode 2 three frames, each with its own delivery proof.
+mode 2 three frames, each with its own delivery proof. Over the namenlos
+bridge (145 ms ping) that doubles a box query, 310 ms against 155 ms, so
+leave Reticulum's `link_mtu_discovery` on where the interfaces allow it.
 
 ## Install
 
