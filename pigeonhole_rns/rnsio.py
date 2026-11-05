@@ -16,7 +16,9 @@ from . import APP_NAME, ASPECT, ASPECT_FILTER, channel, wire
 
 class AnnounceHandler:
     """Feeds replica announces to a callback (dest_hash, identity_hash, bridge,
-    channel). App data bit 0 is bridge, bit 1 serves query mode 2."""
+    channel, mixnet). App data is a flags byte, bit 0 bridge and bit 1 serves
+    query mode 2, then for a bridge the id of its mixnet; a bridge announcing
+    none serves the mixnet named by the empty string."""
 
     aspect_filter = ASPECT_FILTER
 
@@ -25,7 +27,12 @@ class AnnounceHandler:
 
     def received_announce(self, destination_hash, announced_identity, app_data):
         flags = app_data[0] if app_data else 0
-        self.on_replica(bytes(destination_hash), bytes(announced_identity.hash), bool(flags & 1), bool(flags & 2))
+        mixnet = b""
+        if flags & 1:
+            mixnet = bytes(app_data[1 : 1 + wire.MIXNET_ID_SIZE])
+            if len(mixnet) != wire.MIXNET_ID_SIZE:
+                mixnet = wire.mixnet_id("")
+        self.on_replica(bytes(destination_hash), bytes(announced_identity.hash), bool(flags & 1), bool(flags & 2), mixnet)
 
 
 def reachable(dests) -> list:

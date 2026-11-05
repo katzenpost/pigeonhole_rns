@@ -7,7 +7,7 @@ from hpqc.bacap.stateless import WriteCap
 
 from pigeonhole_rns import PIGEONHOLE_CTX, placement, wire
 from pigeonhole_rns.client import pad, position
-from pigeonhole_rns.engine import BRIDGE, CLOSED, OPEN, Engine
+from pigeonhole_rns.engine import BRIDGE, CLOSED, ON_REQUEST, OPEN, TWIN_WAIT, Engine
 from pigeonhole_rns.store import Store
 
 BOX = 100
@@ -95,7 +95,7 @@ def test_forward_acks_and_backs_off(tmp_path):
     answers = {t: wire.SUCCESS for t in targets}
     silent = next(iter(targets))
     answers[silent] = None
-    e.forward_due(targets, lambda dst, b, s, c: answers[dst])
+    e.forward_due(targets, lambda dst, b, s, c, o: answers[dst])
     assert e.store.acked(box) == targets - {silent}
     assert e.store.queued(box) == {silent}
     assert e.store.due(e.now()) == [], "the silent peer is backed off, not retried at once"
@@ -111,11 +111,11 @@ def test_handoff_then_drop_only_after_both_owners_ack(tmp_path):
         return  # this replica owns it; nothing to hand off
     e.handoff(reachable=owners)
     assert e.store.queued(box) == set(owners)
-    e.forward_due(owners, lambda dst, b, s, c: wire.SUCCESS if dst == owners[0] else None)
+    e.forward_due(owners, lambda dst, b, s, c, o: wire.SUCCESS if dst == owners[0] else None)
     e.handoff(reachable=owners)
     assert e.store.get(box) is not None, "one acknowledgement is not enough"
     e.clock[0] += 3600  # past the backoff of the owner that did not answer
-    e.forward_due(owners, lambda dst, b, s, c: wire.ALREADY_EXISTS)
+    e.forward_due(owners, lambda dst, b, s, c, o: wire.ALREADY_EXISTS)
     assert e.handoff(reachable=owners) == 1
     assert e.store.get(box) is None
 
@@ -126,7 +126,7 @@ def test_bridge_push_and_pull(tmp_path):
     e.handle_write(wire.encode_write(box, sig, ct), reachable=[])
     assert BRIDGE in e.store.queued(box)
     pushed = []
-    e.forward_due([], lambda dst, b, s, c: pushed.append(dst) or wire.SUCCESS)
+    e.forward_due([], lambda dst, b, s, c, o: pushed.append(dst) or wire.SUCCESS)
     assert pushed == [BRIDGE]
 
     _, other, osig, oct_ = seal(b"from the mixnet")
@@ -171,7 +171,7 @@ def test_bridge_reachable_later_gets_the_box_once(tmp_path):
     e.handle_write(wire.encode_write(box, sig, ct), reachable=[R2, R3, R4])
     e.handoff(reachable=[R2, R3, R4, R5])
     assert R5 in e.store.queued(box)
-    e.forward_due([R2, R3, R4, R5], lambda dst, b, s, c: wire.SUCCESS)
+    e.forward_due([R2, R3, R4, R5], lambda dst, b, s, c, o: wire.SUCCESS)
     assert R5 in e.store.acked(box)
     e.handoff(reachable=[R2, R3, R4, R5])
     assert R5 not in e.store.queued(box), "a bridge that acknowledged is not sent to again"
@@ -186,11 +186,11 @@ def test_stand_in_keeps_copy_until_bridge_acks(tmp_path):
         return
     e.handoff(reachable=set(owners) | {R5})
     assert e.store.queued(box) == set(owners) | {R5}
-    e.forward_due(set(owners) | {R5}, lambda dst, b, s, c: wire.SUCCESS if dst != R5 else None)
+    e.forward_due(set(owners) | {R5}, lambda dst, b, s, c, o: wire.SUCCESS if dst != R5 else None)
     assert e.handoff(reachable=set(owners) | {R5}) == 0
     assert e.store.get(box) is not None, "both owners hold it, but the mixnet does not yet"
     e.clock[0] += 3600
-    e.forward_due(set(owners) | {R5}, lambda dst, b, s, c: wire.SUCCESS)
+    e.forward_due(set(owners) | {R5}, lambda dst, b, s, c, o: wire.SUCCESS)
     assert e.handoff(reachable=set(owners) | {R5}) == 1
 
 
@@ -202,10 +202,10 @@ def test_bridge_replica_keeps_copy_until_pushed(tmp_path):
     if ME in owners:
         return
     e.handoff(reachable=owners)
-    e.forward_due(owners, lambda dst, b, s, c: wire.SUCCESS if dst != BRIDGE else None)
+    e.forward_due(owners, lambda dst, b, s, c, o: wire.SUCCESS if dst != BRIDGE else None)
     assert e.handoff(reachable=owners) == 0
     e.clock[0] += 3600
-    e.forward_due(owners, lambda dst, b, s, c: wire.SUCCESS)
+    e.forward_due(owners, lambda dst, b, s, c, o: wire.SUCCESS)
     assert e.handoff(reachable=owners) == 1
 
 
@@ -218,7 +218,7 @@ def test_open_write_goes_to_every_replica_but_the_sender(tmp_path):
     _, box, sig, ct = seal()
     e.handle_write(wire.encode_write(box, sig, ct), reachable=[R2, R3, R4, R5], sender=R3)
     assert e.store.queued(box) == {R2, R4, R5}
-    e.forward_due([R2, R3, R4, R5], lambda dst, b, s, c: wire.SUCCESS)
+    e.forward_due([R2, R3, R4, R5], lambda dst, b, s, c, o: wire.SUCCESS)
     assert e.store.queued(box) == set()
     assert e.handoff(reachable=[R2, R3, R4, R5]) == 0
     assert e.store.get(box) is not None, "open mode never drops for placement"
@@ -245,7 +245,7 @@ def pair(tmp_path, monkeypatch):
         return eng[dst].handle_sync(q, sender[dst])
 
     def deliver_from(src):
-        return lambda dst, box_id, s, c: wire.decode_reply(eng[dst].handle_write(wire.encode_write(box_id, s, c), [], src)).code
+        return lambda dst, box_id, s, c, o: wire.decode_reply(eng[dst].handle_write(wire.encode_write(box_id, s, c), [], src, o)).code
 
     def run():
         a.sync([R2], request)
@@ -291,3 +291,62 @@ def test_sync_rejects_out_of_range_reply(tmp_path):
     bad = wire.encode_sync(b"\x00" * 32, [])  # ends at the bottom, no progress
     assert e.sync([R2], lambda d, q: bad) == 0 and e.synced == set()
     assert engine(tmp_path, mode=CLOSED, name="c").handle_sync(wire.encode_sync(bytes(32) + b"\xff" * 32, []), R2) == b""
+
+
+# ---- bridges, open mode ----
+
+
+def test_on_request_bridge_writes_only_client_boxes(tmp_path):
+    e = Engine(Store(str(tmp_path / "e.sqlite")), ME, IDS[ME], box_ciphertext_size=CT, is_bridge=True, mode=OPEN, forward=ON_REQUEST)
+    e.heard(R2, IDS[R2], False)
+    _, mine, sig, ct = seal()
+    e.handle_write(wire.encode_write(mine, sig, ct), [R2])
+    assert e.store.queued(mine) == {R2, BRIDGE}
+    _, fwd, fsig, fct = seal()
+    e.handle_write(wire.encode_write(fwd, fsig, fct), [R2], sender=R2)
+    e.handoff([R2])
+    assert e.store.queued(fwd) == set()
+
+
+def test_bridge_waits_for_its_twin_then_writes(tmp_path):
+    e = engine(tmp_path, is_bridge=True, peers=(), mode=OPEN)
+    e.heard(R2, IDS[R2], True, e.mixnet)
+    while True:
+        _, box, sig, ct = seal()
+        if placement.order(box, [ME, R2], e.identity_of)[0] == R2:
+            break
+    e.handle_write(wire.encode_write(box, sig, ct), [R2], sender=R2)
+    asked, wrote = [], []
+    for _ in range(TWIN_WAIT + 1):
+        e.forward_due([R2], lambda dst, b, s, c, o: wrote.append(dst) or wire.SUCCESS, lambda d, b, t: asked.append(d) or False)
+        e.clock[0] += 700
+    assert asked == [R2] * (TWIN_WAIT + 1) and wrote == [BRIDGE]
+
+    _, box2, sig2, ct2 = seal()
+    e.handle_write(wire.encode_write(box2, sig2, ct2), [R2], sender=R2)
+    e.forward_due([R2], lambda *a: wrote.append(a) or wire.SUCCESS, lambda d, b, t: True)
+    assert wrote == [BRIDGE] and BRIDGE in e.store.acked(box2), "a twin wrote it, so this one does not"
+    assert e.handle_pushed(box2 + b"\x01") == b"\x00" and e.handle_pushed(box2 + b"\x00") == b"\x01"
+
+
+def test_origin_is_kept_only_from_a_known_replica(tmp_path):
+    e = engine(tmp_path, is_bridge=True, mode=OPEN)
+    o = wire.mixnet_id("other")
+    _, box, sig, ct = seal()
+    e.handle_forward(o + wire.encode_write(box, sig, ct), [R2], sender=None)
+    assert e.store.get(box).origin == b""
+    _, box2, sig2, ct2 = seal()
+    e.handle_forward(e.mixnet + wire.encode_write(box2, sig2, ct2), [R2], sender=R2)
+    assert e.store.get(box2).origin == e.mixnet and e.store.queued(box2) == set()
+
+
+def test_announce_carries_the_mixnet():
+    from pigeonhole_rns.rnsio import AnnounceHandler
+
+    got = []
+    h = AnnounceHandler(lambda *a: got.append(a))
+    ident = type("I", (), {"hash": b"i" * 16})()
+    h.received_announce(b"d" * 16, ident, bytes([3]) + wire.mixnet_id("A"))
+    h.received_announce(b"d" * 16, ident, bytes([1]))
+    h.received_announce(b"d" * 16, ident, bytes([2]))
+    assert [a[4] for a in got] == [wire.mixnet_id("A"), wire.mixnet_id(""), b""]

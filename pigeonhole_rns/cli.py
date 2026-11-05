@@ -25,6 +25,9 @@ def main(argv=None) -> int:
     r = sub.add_parser("replica", help="run a storage replica")
     r.add_argument("--storage", required=True, help="directory for identity and boxes")
     r.add_argument("--bridge-socket", help="unix socket of a Katzenpost replica on this host")
+    r.add_argument("--mixnet", default="", help="with --bridge-socket: a name for the mixnet bridged, such as its PKI identity; bridges giving the same name serve one mixnet")
+    r.add_argument("--forward", choices=("all", "on-request"), default="all",
+                   help="with --bridge-socket: write every box into the mixnet, or only those clients write to this replica")
     r.add_argument("--announce-interval", type=float, default=600.0)
     r.add_argument("--mesh-mode", choices=("open", "closed"), default="open",
                    help="open: every replica stores every box; closed: boxes sharded over two owners each, without the authentication a closed mesh will need")
@@ -59,7 +62,8 @@ def main(argv=None) -> int:
     if a.cmd == "replica":
         from .replica import Replica
 
-        Replica(a.config, a.storage, a.box_size, bridge_socket=a.bridge_socket, announce_interval=a.announce_interval, mode=a.mesh_mode, loglevel=loglevel).run_forever()
+        Replica(a.config, a.storage, a.box_size, bridge_socket=a.bridge_socket, announce_interval=a.announce_interval, mode=a.mesh_mode,
+                mixnet=a.mixnet, forward=a.forward, loglevel=loglevel).run_forever()
         return 0
 
     from .client import Client
