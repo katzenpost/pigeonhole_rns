@@ -57,6 +57,8 @@ class Replica:
         self.destination.set_link_established_callback(self._on_link)
 
         self.bridge = BridgeSocket(bridge_socket) if bridge_socket else None
+        # Forwards keep a connection of their own, so reads filling the pool cannot delay them.
+        self._bridge_writes = BridgeSocket(bridge_socket, conns=1) if bridge_socket else None
         # Box plaintext is length prefixed by the client and the AEAD adds a
         # tag. A size of zero accepts any, for a bridge that defers to the
         # mixnet replica's geometry check.
@@ -149,7 +151,7 @@ class Replica:
 
     def _deliver(self, dst: bytes, box_id: bytes, signature: bytes, payload: bytes) -> Optional[int]:
         if dst == engine.BRIDGE:
-            return self.bridge.write(box_id, signature, payload) if self.bridge is not None else None
+            return self._bridge_writes.write(box_id, signature, payload) if self._bridge_writes is not None else None
         raw = self.links.request(dst, "write", wire.encode_write(box_id, signature, payload))
         return None if raw is None else raw[0]
 
@@ -190,6 +192,7 @@ class Replica:
         self.links.close()
         if self.bridge is not None:
             self.bridge.close()
+            self._bridge_writes.close()
         self.engine.store.close()
 
     def run_forever(self) -> None:
