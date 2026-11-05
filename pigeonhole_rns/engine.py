@@ -30,9 +30,12 @@ from .store import Store
 # A pseudo destination for the local Katzenpost replica on a bridge node.
 BRIDGE = b"bridge"
 
-EPOCH_SECONDS = 7 * 24 * 3600
-# Katzenpost replicas count epochs from 2017-06-01 UTC; a bridged box must
-# fall in the same epoch on both sides.
+# Katzenpost's epoch is 20 minutes, and its replica epoch, which boxes are
+# kept by, a week of them, both counted from 2017-06-01 UTC. A bridged box
+# must fall in the same replica epoch on both sides.
+EPOCH_PERIOD = 20 * 60
+REPLICA_EPOCH_EPOCHS = 504
+EPOCH_SECONDS = EPOCH_PERIOD * REPLICA_EPOCH_EPOCHS
 EPOCH_BASE = 1496275200
 
 # Retry backoff for forwards, in seconds.
@@ -52,8 +55,8 @@ TWIN_WAIT = 3
 LOW, HIGH = bytes(32), b"\xff" * 32
 
 
-def epoch_now(now: Optional[float] = None) -> int:
-    return int(((time.time() if now is None else now) - EPOCH_BASE) // EPOCH_SECONDS)
+def epoch_now(now: Optional[float] = None, period: float = EPOCH_SECONDS) -> int:
+    return int(((time.time() if now is None else now) - EPOCH_BASE) // period)
 
 
 @dataclass
@@ -85,6 +88,7 @@ class Engine:
         mode: str = OPEN,
         mixnet: bytes = b"",
         forward: str = ALL,
+        epoch_seconds: float = EPOCH_SECONDS,
     ):
         if mode not in (OPEN, CLOSED):
             raise ValueError("mode must be open or closed")
@@ -100,6 +104,7 @@ class Engine:
         self.is_bridge = is_bridge
         self.box_ciphertext_size = box_ciphertext_size
         self.now = now
+        self.epoch_seconds = epoch_seconds
         self.peers: Dict[bytes, Peer] = {self_dest: Peer(self_identity, is_bridge, mixnet=self.mixnet)}
 
     # ---- membership ----
@@ -185,7 +190,7 @@ class Engine:
         if code != wire.SUCCESS:
             return code
         dsts = self.forwards(q.box_id, reachable, sender, origin, client=sender is None)
-        return self.store.put(q.box_id, q.signature, q.ciphertext, epoch_now(self.now()), dsts, origin)
+        return self.store.put(q.box_id, q.signature, q.ciphertext, self.epoch(), dsts, origin)
 
     def handle_forward(self, data: bytes, reachable: Iterable[bytes], sender: Optional[bytes]) -> bytes:
         """A write prefixed with the mixnet the box came from. The origin
@@ -280,7 +285,7 @@ class Engine:
             q = wire.Query(wire.WRITE, box_id, r.signature, r.ciphertext or b"")
             if self.verify(q) == wire.SUCCESS:
                 dsts = self.forwards(box_id, reachable, origin=origin)
-                self.store.put(box_id, r.signature, r.ciphertext or b"", epoch_now(self.now()), dsts, origin)
+                self.store.put(box_id, r.signature, r.ciphertext or b"", self.epoch(), dsts, origin)
 
     # ---- forwarding and handoff ----
 
@@ -438,6 +443,13 @@ class Engine:
             if box_id not in have or (tomb and not have[box_id]):
                 self.store.enqueue(box_id, dst)
 
+    def epoch(self) -> int:
+        return epoch_now(self.now(), self.epoch_seconds)
+
+    def till_next_epoch(self) -> float:
+        return self.epoch_seconds - (self.now() - EPOCH_BASE) % self.epoch_seconds
+
     def gc(self) -> int:
-        cur = epoch_now(self.now())
+        """Keeps the current and previous replica epoch, as Katzenpost replicas do."""
+        cur = self.epoch()
         return self.store.sweep([cur, cur - 1])
