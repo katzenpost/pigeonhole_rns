@@ -5,9 +5,9 @@ import os
 
 from hpqc.bacap.stateless import WriteCap
 
-from pigeonhole_rns import PIGEONHOLE_CTX, placement, wire
+from pigeonhole_rns import PIGEONHOLE_CTX, wire
 from pigeonhole_rns.client import pad, position
-from pigeonhole_rns.engine import BRIDGE, CLOSED, ON_REQUEST, OPEN, TWIN_WAIT, Engine
+from pigeonhole_rns.engine import BRIDGE, ON_REQUEST, TWIN_WAIT, Engine
 from pigeonhole_rns.store import Store
 
 BOX = 100
@@ -17,10 +17,9 @@ ME, R2, R3, R4 = b"me" * 8, b"r2" * 8, b"r3" * 8, b"r4" * 8
 IDS = {ME: b"I" + ME, R2: b"I" + R2, R3: b"I" + R3, R4: b"I" + R4}
 
 
-# The tests below default to closed mode, which shards; the open mode tests are at the end.
-def engine(tmp_path, is_bridge=False, peers=(R2, R3, R4), mode=CLOSED, me=ME, name="e"):
+def engine(tmp_path, is_bridge=False, peers=(R2, R3, R4), me=ME, name="e"):
     clock = [1000.0]
-    e = Engine(Store(str(tmp_path / (name + ".sqlite"))), me, IDS[me], box_ciphertext_size=CT, is_bridge=is_bridge, now=lambda: clock[0], mode=mode)
+    e = Engine(Store(str(tmp_path / (name + ".sqlite"))), me, IDS[me], box_ciphertext_size=CT, is_bridge=is_bridge, now=lambda: clock[0])
     e.clock = clock
     for p in peers:
         e.heard(p, IDS[p], False)
@@ -34,10 +33,11 @@ def seal(text=b"yo", index=0):
     return cap, box, sig, ct
 
 
-def test_order_is_shared_and_stable():
+def test_order_is_shared_and_stable(tmp_path):
+    e = engine(tmp_path)
     box = os.urandom(32)
-    a = placement.order(box, [ME, R2, R3], lambda d: IDS[d])
-    b = placement.order(box, [R3, ME, R2], lambda d: IDS[d])
+    a = e.order(box, [ME, R2, R3])
+    b = e.order(box, [R3, ME, R2])
     assert a == b and set(a) == {ME, R2, R3}
 
 
@@ -46,9 +46,7 @@ def test_write_verifies_stores_and_forwards(tmp_path):
     _, box, sig, ct = seal()
     reply = e.handle_write(wire.encode_write(box, sig, ct), reachable=[R2, R3, R4])
     assert reply == bytes([wire.SUCCESS])
-    targets = {d for _, d, _ in e.store.due(0)}
-    assert targets == set(e.targets(box, [R2, R3, R4])) - {ME}
-    assert len(targets) <= 2
+    assert {d for _, d, _ in e.store.due(0)} == {R2, R3, R4}
 
     bad = bytearray(sig)
     bad[0] ^= 1
@@ -64,7 +62,7 @@ def test_write_is_acknowledged_even_when_alone(tmp_path):
     assert e.store.due(0) == []
 
 
-def test_read_walks_past_owners(tmp_path):
+def test_read_walks_the_order(tmp_path):
     e = engine(tmp_path)
     _, box, sig, ct = seal()
     holder = {R4: wire.Reply(wire.SUCCESS, sig, ct)}
@@ -76,7 +74,7 @@ def test_read_walks_past_owners(tmp_path):
 
     reply = wire.decode_reply(e.handle_read(wire.encode_read(box), [R2, R3, R4], peek))
     assert reply.code == wire.SUCCESS and reply.ciphertext == ct
-    assert asked == placement.order(box, [R2, R3, R4], e.identity_of)[: asked.index(R4) + 1]
+    assert asked == e.order(box, [R2, R3, R4])[: asked.index(R4) + 1]
     assert e.store.get(box) is not None, "a fetched box is adopted"
 
 
@@ -101,25 +99,6 @@ def test_forward_acks_and_backs_off(tmp_path):
     assert e.store.due(e.now()) == [], "the silent peer is backed off, not retried at once"
 
 
-def test_handoff_then_drop_only_after_both_owners_ack(tmp_path):
-    e = engine(tmp_path)
-    _, box, sig, ct = seal()
-    # Written while only this replica was reachable: no forwards queued.
-    e.handle_write(wire.encode_write(box, sig, ct), reachable=[])
-    owners = e.owners(box)
-    if ME in owners:
-        return  # this replica owns it; nothing to hand off
-    e.handoff(reachable=owners)
-    assert e.store.queued(box) == set(owners)
-    e.forward_due(owners, lambda dst, b, s, c, o: wire.SUCCESS if dst == owners[0] else None)
-    e.handoff(reachable=owners)
-    assert e.store.get(box) is not None, "one acknowledgement is not enough"
-    e.clock[0] += 3600  # past the backoff of the owner that did not answer
-    e.forward_due(owners, lambda dst, b, s, c, o: wire.ALREADY_EXISTS)
-    assert e.handoff(reachable=owners) == 1
-    assert e.store.get(box) is None
-
-
 def test_bridge_push_and_pull(tmp_path):
     e = engine(tmp_path, is_bridge=True)
     _, box, sig, ct = seal()
@@ -141,93 +120,21 @@ R5 = b"r5" * 8
 IDS[R5] = b"I" + R5
 
 
-def engine_with_bridge(tmp_path):
-    e = engine(tmp_path)
-    e.heard(R5, IDS[R5], True)
-    return e
-
-
-def test_write_reaches_one_bridge_from_any_entry(tmp_path):
-    e = engine_with_bridge(tmp_path)
-    _, box, sig, ct = seal()
-    e.handle_write(wire.encode_write(box, sig, ct), reachable=[R2, R3, R4, R5])
-    assert R5 in e.store.queued(box), "a non-bridge entry still sends to the bridge"
-    assert e.store.queued(box) == (set(e.targets(box, [R2, R3, R4, R5])) - {ME}) | {R5}
-    assert BRIDGE not in e.store.queued(box)
-
-
-def test_no_bridge_reachable_queues_nothing_extra(tmp_path):
-    e = engine_with_bridge(tmp_path)
-    _, box, sig, ct = seal()
-    e.handle_write(wire.encode_write(box, sig, ct), reachable=[R2, R3, R4])
-    assert e.store.queued(box) == set(e.targets(box, [R2, R3, R4])) - {ME}
-    assert e.handoff(reachable=[R2, R3, R4]) == 0
-    assert R5 not in e.store.queued(box)
-
-
-def test_bridge_reachable_later_gets_the_box_once(tmp_path):
-    e = engine_with_bridge(tmp_path)
-    _, box, sig, ct = seal()
-    e.handle_write(wire.encode_write(box, sig, ct), reachable=[R2, R3, R4])
-    e.handoff(reachable=[R2, R3, R4, R5])
-    assert R5 in e.store.queued(box)
-    e.forward_due([R2, R3, R4, R5], lambda dst, b, s, c, o: wire.SUCCESS)
-    assert R5 in e.store.acked(box)
-    e.handoff(reachable=[R2, R3, R4, R5])
-    assert R5 not in e.store.queued(box), "a bridge that acknowledged is not sent to again"
-
-
-def test_stand_in_keeps_copy_until_bridge_acks(tmp_path):
-    e = engine_with_bridge(tmp_path)
-    _, box, sig, ct = seal()
-    e.handle_write(wire.encode_write(box, sig, ct), reachable=[])
-    owners = e.owners(box)
-    if ME in owners:
-        return
-    e.handoff(reachable=set(owners) | {R5})
-    assert e.store.queued(box) == set(owners) | {R5}
-    e.forward_due(set(owners) | {R5}, lambda dst, b, s, c, o: wire.SUCCESS if dst != R5 else None)
-    assert e.handoff(reachable=set(owners) | {R5}) == 0
-    assert e.store.get(box) is not None, "both owners hold it, but the mixnet does not yet"
-    e.clock[0] += 3600
-    e.forward_due(set(owners) | {R5}, lambda dst, b, s, c, o: wire.SUCCESS)
-    assert e.handoff(reachable=set(owners) | {R5}) == 1
-
-
-def test_bridge_replica_keeps_copy_until_pushed(tmp_path):
-    e = engine(tmp_path, is_bridge=True)
-    _, box, sig, ct = seal()
-    e.handle_write(wire.encode_write(box, sig, ct), reachable=[])
-    owners = e.owners(box)
-    if ME in owners:
-        return
-    e.handoff(reachable=owners)
-    e.forward_due(owners, lambda dst, b, s, c, o: wire.SUCCESS if dst != BRIDGE else None)
-    assert e.handoff(reachable=owners) == 0
-    e.clock[0] += 3600
-    e.forward_due(owners, lambda dst, b, s, c, o: wire.SUCCESS)
-    assert e.handoff(reachable=owners) == 1
-
-
-# ---- open mode: every replica stores every box ----
-
-
 def test_open_write_goes_to_every_replica_but_the_sender(tmp_path):
-    e = engine(tmp_path, mode=OPEN)
+    e = engine(tmp_path)
     e.heard(R5, IDS[R5], True)
     _, box, sig, ct = seal()
     e.handle_write(wire.encode_write(box, sig, ct), reachable=[R2, R3, R4, R5], sender=R3)
     assert e.store.queued(box) == {R2, R4, R5}
     e.forward_due([R2, R3, R4, R5], lambda dst, b, s, c, o: wire.SUCCESS)
     assert e.store.queued(box) == set()
-    assert e.handoff(reachable=[R2, R3, R4, R5]) == 0
-    assert e.store.get(box) is not None, "open mode never drops for placement"
+    assert e.store.get(box) is not None
     assert e.handle_write(wire.encode_write(box, sig, ct), [R2, R3, R4, R5], sender=R2) == bytes([wire.SUCCESS])
     assert e.store.queued(box) == set(), "a box already held is not passed on again"
 
 
 def test_open_bridge_replica_pushes_to_mixnet(tmp_path):
-    e = engine(tmp_path, is_bridge=True, mode=OPEN)
+    e = engine(tmp_path, is_bridge=True)
     _, box, sig, ct = seal()
     e.handle_write(wire.encode_write(box, sig, ct), reachable=[R2], sender=R2)
     assert e.store.queued(box) == {BRIDGE}
@@ -236,8 +143,8 @@ def test_open_bridge_replica_pushes_to_mixnet(tmp_path):
 def pair(tmp_path, monkeypatch):
     """Two open replicas whose sync and forwards call each other in process."""
     monkeypatch.setattr(wire, "SYNC_PAGE", 2)
-    a = engine(tmp_path, peers=(R2,), mode=OPEN, name="a")
-    b = engine(tmp_path, peers=(ME,), mode=OPEN, me=R2, name="b")
+    a = engine(tmp_path, peers=(R2,), name="a")
+    b = engine(tmp_path, peers=(ME,), me=R2, name="b")
     eng = {ME: a, R2: b}
     sender = {ME: R2, R2: ME}
 
@@ -287,33 +194,32 @@ def test_open_resyncs_after_peer_was_unreachable(tmp_path, monkeypatch):
 
 
 def test_sync_rejects_out_of_range_reply(tmp_path):
-    e = engine(tmp_path, mode=OPEN)
+    e = engine(tmp_path)
     bad = wire.encode_sync(b"\x00" * 32, [])  # ends at the bottom, no progress
     assert e.sync([R2], lambda d, q: bad) == 0 and e.synced == set()
-    assert engine(tmp_path, mode=CLOSED, name="c").handle_sync(wire.encode_sync(bytes(32) + b"\xff" * 32, []), R2) == b""
 
 
-# ---- bridges, open mode ----
+# ---- bridges ----
 
 
 def test_on_request_bridge_writes_only_client_boxes(tmp_path):
-    e = Engine(Store(str(tmp_path / "e.sqlite")), ME, IDS[ME], box_ciphertext_size=CT, is_bridge=True, mode=OPEN, forward=ON_REQUEST)
+    e = Engine(Store(str(tmp_path / "e.sqlite")), ME, IDS[ME], box_ciphertext_size=CT, is_bridge=True, forward=ON_REQUEST)
     e.heard(R2, IDS[R2], False)
     _, mine, sig, ct = seal()
     e.handle_write(wire.encode_write(mine, sig, ct), [R2])
     assert e.store.queued(mine) == {R2, BRIDGE}
     _, fwd, fsig, fct = seal()
     e.handle_write(wire.encode_write(fwd, fsig, fct), [R2], sender=R2)
-    e.handoff([R2])
+    e.handoff()
     assert e.store.queued(fwd) == set()
 
 
 def test_bridge_waits_for_its_twin_then_writes(tmp_path):
-    e = engine(tmp_path, is_bridge=True, peers=(), mode=OPEN)
+    e = engine(tmp_path, is_bridge=True, peers=())
     e.heard(R2, IDS[R2], True, e.mixnet)
     while True:
         _, box, sig, ct = seal()
-        if placement.order(box, [ME, R2], e.identity_of)[0] == R2:
+        if e.order(box, [ME, R2])[0] == R2:
             break
     e.handle_write(wire.encode_write(box, sig, ct), [R2], sender=R2)
     asked, wrote = [], []
@@ -330,7 +236,7 @@ def test_bridge_waits_for_its_twin_then_writes(tmp_path):
 
 
 def test_origin_is_kept_only_from_a_known_replica(tmp_path):
-    e = engine(tmp_path, is_bridge=True, mode=OPEN)
+    e = engine(tmp_path, is_bridge=True)
     o = wire.mixnet_id("other")
     _, box, sig, ct = seal()
     e.handle_forward(o + wire.encode_write(box, sig, ct), [R2], sender=None)
@@ -353,7 +259,7 @@ def test_announce_carries_the_mixnet():
 
 
 def test_a_silent_peer_is_tried_once_a_round_and_holds_up_no_other(tmp_path):
-    e = engine(tmp_path, mode=OPEN)
+    e = engine(tmp_path)
     boxes = [seal(index=i)[1:] for i in range(3)]
     for box, sig, ct in boxes:
         e.handle_write(wire.encode_write(box, sig, ct), reachable=[R2, R3])

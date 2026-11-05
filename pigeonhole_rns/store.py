@@ -202,13 +202,6 @@ class Store:
                 raise
         return wire.SUCCESS
 
-    def drop(self, box_id: bytes) -> None:
-        with self._lock:
-            self._db.execute("BEGIN IMMEDIATE")
-            self._db.execute("DELETE FROM boxes WHERE box_id = ? AND length(payload) > 0", (box_id,))
-            self._db.execute("DELETE FROM acks WHERE box_id = ?", (box_id,))
-            self._db.execute("COMMIT")
-
     def box_ids(self) -> List[bytes]:
         with self._lock:
             return [bytes(r[0]) for r in self._db.execute("SELECT box_id FROM boxes")]

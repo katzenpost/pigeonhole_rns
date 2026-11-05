@@ -38,8 +38,6 @@ class Replica:
         announce_interval: float = 600.0,
         forward_interval: float = 2.0,
         handoff_interval: float = 30.0,
-        k: int = 2,
-        mode: str = engine.OPEN,
         mixnet: str = "",
         forward: str = engine.ALL,
         loglevel: int = RNS.LOG_NOTICE,
@@ -79,9 +77,7 @@ class Replica:
             bytes(self.destination.hash),
             bytes(self.identity.hash),
             box_ciphertext_size=ciphertext_size,
-            k=k,
             is_bridge=self.bridge is not None,
-            mode=mode,
             mixnet=wire.mixnet_id(mixnet),
             forward=forward,
             epoch_seconds=epoch_period * replica_epoch_epochs,
@@ -227,7 +223,7 @@ class Replica:
         while not self._stop.wait(self.handoff_interval):
             try:
                 reachable = self._reachable()
-                self.engine.handoff(reachable)
+                self.engine.handoff()
                 self.engine.sync(reachable, lambda dst, q: self.links.request(dst, "sync", q))
             except Exception as e:
                 RNS.log("pigeonhole: handoff: %s" % e, RNS.LOG_ERROR)

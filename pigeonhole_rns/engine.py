@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: © 2026 David Stainton
 # SPDX-License-Identifier: AGPL-3.0-only
 """The replica's decisions, free of Reticulum so they can be tested in
-process: membership, placement, the entry path, forwarding, handoff, sync,
-the read walk and the bridge.
+process: membership, the entry path, forwarding, sync, the read walk and the
+bridge.
 
-In open mode every replica stores every box: a new box goes to every replica
-heard, and replicas that meet sync the boxes the other lacks. Closed mode,
-for a future mesh whose replicas authenticate out of band, shards: two
-owners per box by rendezvous hashing, and stand-ins hand off and drop.
+Open mode: every replica stores every box. A new box goes to every replica
+heard, and replicas that meet sync the boxes the other lacks. A sharded
+closed mode, for a mesh whose replicas authenticate out of band, is future
+work.
 
 A bridge is a replica like any other, and also writes boxes into the
 mixnet it serves: every box, or with forward on-request only those a client
@@ -17,6 +17,7 @@ before writing, so each box goes to each mixnet once, barring retries."""
 
 from __future__ import annotations
 
+import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -24,7 +25,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set
 
 from hpqc.bacap.stateless import MessageBoxIndex
 
-from . import placement, wire
+from . import wire
 from .store import Store
 
 # A pseudo destination for the local Katzenpost replica on a bridge node.
@@ -42,9 +43,6 @@ EPOCH_BASE = 1496275200
 BACKOFF_BASE = 5.0
 BACKOFF_CAP = 600.0
 
-OPEN = "open"
-CLOSED = "closed"
-
 ALL = "all"
 ON_REQUEST = "on-request"
 
@@ -53,6 +51,13 @@ ON_REQUEST = "on-request"
 TWIN_WAIT = 3
 
 LOW, HIGH = bytes(32), b"\xff" * 32
+
+
+def score(identity: bytes, box_id: bytes) -> bytes:
+    """Rendezvous hashing: a replica's score for a box, lowest first, which
+    orders the read walk and the bridges of a mixnet. Anyone with the same
+    replicas computes the same order."""
+    return hashlib.sha256(identity + box_id).digest()
 
 
 def epoch_now(now: Optional[float] = None, period: float = EPOCH_SECONDS) -> int:
@@ -82,25 +87,19 @@ class Engine:
         self_dest: bytes,
         self_identity: bytes,
         box_ciphertext_size: Optional[int] = None,
-        k: int = placement.K,
         is_bridge: bool = False,
         now: Callable[[], float] = time.time,
-        mode: str = OPEN,
         mixnet: bytes = b"",
         forward: str = ALL,
         epoch_seconds: float = EPOCH_SECONDS,
     ):
-        if mode not in (OPEN, CLOSED):
-            raise ValueError("mode must be open or closed")
         if forward not in (ALL, ON_REQUEST):
             raise ValueError("forward must be all or on-request")
-        self.mode = mode
         self.mixnet = (mixnet or wire.mixnet_id("")) if is_bridge else b""
         self.forward = forward
         self.synced: Set[bytes] = set()
         self.store = store
         self.self_dest = self_dest
-        self.k = k
         self.is_bridge = is_bridge
         self.box_ciphertext_size = box_ciphertext_size
         self.now = now
@@ -124,24 +123,16 @@ class Engine:
     def peer_of(self, identity: bytes) -> Optional[bytes]:
         return next((d for d, p in self.peers.items() if p.identity == identity and d != self.self_dest), None)
 
-    def owners(self, box_id: bytes) -> List[bytes]:
-        return placement.first(box_id, self.peers.keys(), self.identity_of, self.k)
-
-    def targets(self, box_id: bytes, reachable: Iterable[bytes]) -> List[bytes]:
-        cands = set(reachable) | {self.self_dest}
-        return placement.first(box_id, cands, self.identity_of, self.k)
+    def order(self, box_id: bytes, replicas: Iterable[bytes]) -> List[bytes]:
+        """Replicas heard, by destination, in the box's order."""
+        return sorted(replicas, key=lambda r: score(self.identity_of(r), box_id))
 
     def forwards(self, box_id: bytes, reachable: Iterable[bytes], sender: Optional[bytes] = None, origin: bytes = b"", client: bool = False) -> List[bytes]:
-        """Where a newly stored box is sent: in open mode every reachable
-        replica heard, in closed mode the first k in its order and a bridge;
+        """Where a newly stored box is sent: every reachable replica heard,
         and on a bridge its mixnet, unless the box came from there or the
         bridge forwards on request and no client wrote it here. Never back
         to the replica it came from."""
-        reachable = list(reachable)
-        if self.mode == OPEN:
-            dsts = [d for d in reachable if d in self.peers]
-        else:
-            dsts = self.targets(box_id, reachable) + self.bridge_targets(box_id, reachable)
+        dsts = [d for d in reachable if d in self.peers]
         if self.to_mixnet(origin, client):
             dsts.append(BRIDGE)
         return list(dict.fromkeys(d for d in dsts if d not in (self.self_dest, sender)))
@@ -155,18 +146,6 @@ class Engine:
     def twins(self, reachable: Iterable[bytes]) -> List[bytes]:
         """Reachable bridges serving this bridge's mixnet."""
         return [d for d in self.bridges(reachable) if self.peers[d].mixnet == self.mixnet]
-
-    def bridge_targets(self, box_id: bytes, reachable: Iterable[bytes]) -> List[bytes]:
-        """In closed mode, where a box held by a replica that is not a
-        bridge goes so that it reaches the mixnet: the first reachable
-        bridge in the box's order. The mixnet never pulls from the mesh, so
-        every holder sends, and all pick the same bridge."""
-        if self.is_bridge or self.mode == OPEN:
-            return []
-        return placement.order(box_id, self.bridges(reachable), self.identity_of)[:1]
-
-    def is_bridge_dst(self, dst: bytes) -> bool:
-        return dst == BRIDGE or (dst in self.peers and self.peers[dst].bridge)
 
     # ---- verification ----
 
@@ -258,7 +237,7 @@ class Engine:
         reachable = list(reachable)
         r, adopt = self.local(q.box_id), False
         if r is None:
-            for dst in placement.order(q.box_id, [d for d in reachable if d != self.self_dest and d in self.peers], self.identity_of):
+            for dst in self.order(q.box_id, [d for d in reachable if d != self.self_dest and d in self.peers]):
                 got = peek(dst, q.box_id)
                 if got is not None and got.code in (wire.SUCCESS, wire.TOMBSTONE):
                     r, adopt = got, not self.peers[dst].bridge
@@ -323,7 +302,7 @@ class Engine:
                 code = None
             elif twins and any(pushed(t, box_id, box.is_tombstone) for t in twins):
                 code = wire.SUCCESS
-            elif twins and attempts < TWIN_WAIT and placement.order(box_id, twins + [self.self_dest], self.identity_of)[0] != self.self_dest:
+            elif twins and attempts < TWIN_WAIT and self.order(box_id, twins + [self.self_dest])[0] != self.self_dest:
                 code = None
             else:
                 code = deliver(dst, box_id, box.signature, box.payload, box.origin)
@@ -338,54 +317,23 @@ class Engine:
                 self.store.backoff(box_id, dst, now + delay)
         return done
 
-    def handoff(self, reachable: Iterable[bytes]) -> int:
-        """For every held box: on a bridge forwarding all, enqueue to its
-        mixnet if not written there yet and not from there; in closed mode,
-        enqueue to a bridge if none has taken it yet.
-        Open mode stops there. In closed mode, for one whose owners, in this
-        replica's view, do not include it: enqueue to owners not yet
-        acknowledged, and drop the copy once both owners and the bridge, if
-        one is queued, have acknowledged.
-        Tombstones are never dropped. Returns how many copies were dropped."""
-        reachable = set(reachable)
-        dropped = 0
+    def handoff(self) -> None:
+        """On a bridge forwarding all: enqueues to its mixnet every held box
+        not written there yet and not from there."""
+        if not (self.is_bridge and self.forward == ALL):
+            return
         for box_id in self.store.box_ids():
-            acked = self.store.acked(box_id)
-            queued = self.store.queued(box_id)
-            if self.is_bridge and self.forward == ALL and BRIDGE not in acked | queued:
+            if BRIDGE not in self.store.acked(box_id) | self.store.queued(box_id):
                 box = self.store.get(box_id)
                 if box is not None and box.origin != self.mixnet:
                     self.store.enqueue(box_id, BRIDGE)
-                    queued.add(BRIDGE)
-            if not any(self.is_bridge_dst(d) for d in acked | queued):
-                for bdst in self.bridge_targets(box_id, reachable):
-                    self.store.enqueue(box_id, bdst)
-                    queued.add(bdst)
-            if self.mode == OPEN:
-                continue
-            owners = self.owners(box_id)
-            if self.self_dest in owners:
-                continue
-            for o in owners:
-                if o in reachable and o not in acked and o not in queued:
-                    self.store.enqueue(box_id, o)
-                    queued.add(o)
-            box = self.store.get(box_id)
-            if box is None or box.is_tombstone:
-                continue
-            if len(owners) == self.k and all(o in acked for o in owners) and not queued:
-                self.store.drop(box_id)
-                dropped += 1
-        return dropped
 
-    # ---- sync, open mode ----
+    # ---- sync ----
 
     def sync(self, reachable: Iterable[bytes], request: Request) -> int:
         """Syncs with each reachable replica not synced with since this
         replica started or last found it unreachable. Returns how many
         synced."""
-        if self.mode != OPEN:
-            return 0
         reachable = {d for d in reachable if d in self.peers and d != self.self_dest}
         self.synced &= reachable
         done = 0
@@ -425,7 +373,7 @@ class Engine:
         except wire.WireError:
             return b""
         cursor, hi = head[: wire.BOX_ID_SIZE], head[wire.BOX_ID_SIZE :]
-        if self.mode != OPEN or not cursor < hi:
+        if not cursor < hi:
             return b""
         mine = self.store.entries(cursor, hi, wire.SYNC_PAGE)
         top = mine[-1][0] if len(mine) == wire.SYNC_PAGE else hi
