@@ -47,13 +47,21 @@ pub struct Mesh {
     next_id: AtomicU16,
 }
 
-/// Sends `frames` on `ch`, waiting for the Channel's window; false once the Link closes.
+/// A Channel window shut this long has lost its delivery proofs for good: Reticulum-rs's watcher
+/// task ends when its Link event broadcast lags (rust/quint).
+const STALL: Duration = Duration::from_secs(15);
+
+/// Sends `frames` on `ch`, waiting for the Channel's window; false once the Link closes or the
+/// window stalls.
 pub async fn send_frames(ch: &Channel<Frame>, link: &Mutex<Link>, frames: &[Frame]) -> bool {
     for f in frames {
+        let stalled = Instant::now() + STALL;
         loop {
             match ch.send(f).await {
                 Ok(_) => break,
-                Err(RnsError::LinkNotReady) if link.lock().await.status() != LinkStatus::Closed => {
+                Err(RnsError::LinkNotReady)
+                    if Instant::now() < stalled && link.lock().await.status() != LinkStatus::Closed =>
+                {
                     sleep(Duration::from_millis(10)).await
                 }
                 Err(_) => return false,

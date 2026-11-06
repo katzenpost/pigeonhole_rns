@@ -277,8 +277,11 @@ impl Replica {
                         let _permit = r.handlers.acquire().await;
                         r.on_message(&q, sender, &link_id).await
                     };
-                    if let Some(frames) = channel::split(rid, &reply) {
-                        let _ = timeout(mesh::QUERY_TIMEOUT, mesh::send_frames(&ch, &link, &frames)).await;
+                    if let Some(frames) = channel::split(rid, &reply)
+                        && !matches!(timeout(mesh::QUERY_TIMEOUT, mesh::send_frames(&ch, &link, &frames)).await, Ok(true))
+                    {
+                        // A wedged Channel does not recover; its client opens a new Link.
+                        let _ = r.t.link_close(link_id).await;
                     }
                 }
             });

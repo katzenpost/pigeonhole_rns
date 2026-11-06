@@ -6,6 +6,7 @@ replica destination, keeping a Link to it, and making a request on it."""
 from __future__ import annotations
 
 import threading
+import time
 from typing import Dict, Optional
 
 import RNS
@@ -64,6 +65,7 @@ class Links:
         self._mu = threading.Lock()
         self._endpoints: Dict[bytes, channel.Endpoint] = {}
         self._replies: Dict[int, list] = {}
+        self._early: Dict[bytes, object] = {}
         self._next_id = 0
         # Each replica's announce flags, and whether request() asks in mode 2 those serving it.
         self.flags: Dict[bytes, int] = {}
@@ -101,9 +103,28 @@ class Links:
             return None
         if self.identity is not None:
             link.identify(self.identity)
+        self._keep_early(link)
         with self._mu:
             self._links[dest] = link
         return link
+
+    def _keep_early(self, link: RNS.Link) -> None:
+        """RNS's Link.request sends the request before registering it, and drops a response
+        arriving in between, leaving the caller to wait out its timeout. Such a response is
+        kept here for _request (pigeonhole_rns/quint)."""
+        # shortcut: a response sent as a Resource is still dropped if its advertisement wins
+        # the race; wrap Link.receive too if that shows up.
+        handle = link.handle_response
+
+        def handle_response(request_id, response_data, *a, **kw):
+            with self._mu:
+                if not any(r.request_id == request_id for r in list(link.pending_requests)):
+                    self._early[request_id] = response_data
+                    while len(self._early) > 64:
+                        self._early.pop(next(iter(self._early)))
+            handle(request_id, response_data, *a, **kw)
+
+        link.handle_response = handle_response
 
     def request(self, dest: bytes, path: str, data: bytes) -> Optional[bytes]:
         """Returns the reply bytes, or None when the replica did not answer. Asks in mode 2
@@ -133,6 +154,10 @@ class Links:
             receipt = link.request(path, data, response_callback=lambda _r: done.set(), failed_callback=lambda _r: done.set(), timeout=self.request_timeout)
             if receipt is False or receipt is None:
                 return None
+            with self._mu:
+                early = self._early.pop(receipt.request_id, done)
+            if early is not done:
+                return None if early is None else bytes(early)
             done.wait(self.request_timeout)
             if receipt.status != RNS.RequestReceipt.READY:
                 return None
@@ -154,8 +179,18 @@ class Links:
                 self._next_id = (rid + 1) & 0xFFFF
                 slot = self._replies[rid] = [threading.Event(), None]
             try:
-                if not ep.send(rid, data, self.request_timeout) or not slot[0].wait(self.request_timeout):
+                deadline = time.time() + self.request_timeout
+                if not ep.send(rid, data, self.request_timeout):
                     return None
+                # A Link closed under the query fails it at once, and one whose query timed out
+                # is closed, as its Channel may have lost a frame for good (rust/quint); the next
+                # query opens a new Link.
+                while not slot[0].wait(0.25):
+                    if link.status == RNS.Link.CLOSED:
+                        return None
+                    if time.time() > deadline:
+                        link.teardown()
+                        return None
                 return slot[1]
             finally:
                 with self._mu:
