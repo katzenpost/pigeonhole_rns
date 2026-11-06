@@ -65,7 +65,7 @@ def test_wire():
 def node(tmp_path, is_bridge=False, bridge_read=None):
     """A replica without Reticulum: its Links are the queues of L1 and L2."""
     me = object.__new__(replica.Replica)
-    me.engine = Engine(Store(str(tmp_path / "e.sqlite")), ME, b"I" + ME, box_ciphertext_size=BOX + 20, is_bridge=is_bridge)
+    me.engine = Engine(Store(str(tmp_path / "e.sqlite")), ME, b"I" + ME, box_ciphertext_sizes=(BOX + 20,), is_bridge=is_bridge)
     me.engine.heard(PEER, b"I" + PEER, False)
     me.clock = [0.0]
     me.subs = push.Subscriptions(limit=4, now=lambda: me.clock[0])

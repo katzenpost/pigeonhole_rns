@@ -24,7 +24,7 @@ pub const MAX_PIECES: usize = 255;
 const HEADER: usize = 4;
 /// The Link MDU at the 500 byte MTU Reticulum-rs links run at, less Channel's 6 byte
 /// envelope and the frame header.
-pub const PIECE: usize = 431 - 6 - HEADER;
+pub const PIECE: usize = crate::wire::LINK_MDU - 6 - HEADER;
 const REASSEMBLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]

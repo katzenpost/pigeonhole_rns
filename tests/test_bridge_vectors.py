@@ -58,6 +58,6 @@ def test_box(v, tmp_path):
     from pigeonhole_rns.engine import Engine
     from pigeonhole_rns.store import Store
 
-    e = Engine(Store(str(tmp_path / "v.sqlite")), b"\x01" * 16, b"\x02" * 32, box_ciphertext_size=v["ciphertext_size"])
+    e = Engine(Store(str(tmp_path / "v.sqlite")), b"\x01" * 16, b"\x02" * 32, box_ciphertext_sizes=(v["ciphertext_size"],))
     q = wire.Query(wire.WRITE, bytes.fromhex(v["box_id"]), bytes.fromhex(v["signature"]), bytes.fromhex(v["ciphertext"]))
     assert e.verify(q) == v["expect"]

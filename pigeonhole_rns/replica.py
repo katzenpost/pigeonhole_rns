@@ -13,7 +13,7 @@ import os
 import queue
 import threading
 import time
-from typing import Optional
+from typing import Iterable, Optional
 
 import RNS
 
@@ -36,7 +36,7 @@ class Replica:
         self,
         configdir: Optional[str],
         storage_dir: str,
-        box_plaintext_size: int,
+        box_plaintext_sizes: Iterable[int],
         bridge_socket: Optional[str] = None,
         announce_interval: float = 600.0,
         forward_interval: float = 2.0,
@@ -73,19 +73,16 @@ class Replica:
         self.bridge = BridgeSocket(bridge_socket) if bridge_socket else None
         # Forwards keep a connection of their own, so reads filling the pool cannot delay them.
         self._bridge_writes = BridgeSocket(bridge_socket, conns=1) if bridge_socket else None
-        # Box plaintext is length prefixed by the client and the AEAD adds a
-        # tag. A size of zero accepts any, for a bridge that defers to the
-        # mixnet replica's geometry check.
-        ciphertext_size = box_plaintext_size + 4 + 16 if box_plaintext_size > 0 else None
         self.engine = engine.Engine(
             Store(os.path.join(storage_dir, "boxes.sqlite"), max_storage_mib << 20, min_free_storage_mib << 20),
             bytes(self.destination.hash),
             bytes(self.identity.hash),
-            box_ciphertext_size=ciphertext_size,
+            box_ciphertext_sizes=wire.ciphertext_sizes(box_plaintext_sizes),
             is_bridge=self.bridge is not None,
             mixnet=wire.mixnet_id(mixnet),
             forward=forward,
             epoch_seconds=epoch_period * replica_epoch_epochs,
+            log=lambda m: RNS.log(m, RNS.LOG_NOTICE),
         )
         self.subs = push.Subscriptions()
         # Each Link's push queue, by link id, drained by a thread of its own.

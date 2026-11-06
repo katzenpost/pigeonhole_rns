@@ -13,6 +13,59 @@ pub const WRITE: u8 = 1;
 pub const BOX_ID_SIZE: usize = 32;
 pub const SIGNATURE_SIZE: usize = 64;
 
+
+/// Box payload profiles, as in `wire.py`: a replica takes boxes of several plaintext sizes at
+/// once. A client length prefixes the plaintext (4 bytes) and pads it to one, and the AEAD adds a 16 byte tag; Box ID and signature sizes never change. The mixnet's is
+/// fixed by its Sphinx geometry. The mesh's is the largest whose write, and a replica's forward
+/// of it, go in one Link packet at Reticulum's 500 byte MTU in either query mode; request mode,
+/// msgpack [timestamp, path hash, data], frames a query in more than Channel mode does.
+pub const BOX_OVERHEAD: usize = 4 + 16;
+pub const BOX_PLAINTEXT_MIXNET: usize = 1549;
+/// Python RNS's Link MDU at the 500 byte MTU, which Reticulum-rs links run at too.
+pub const LINK_MDU: usize = 431;
+/// RNS's msgpack framing of a Link request: fixarray, float64 timestamp, bin8 path hash, bin16
+/// data.
+const REQUEST_OVERHEAD: usize = 1 + 9 + 2 + 16 + 3;
+/// Channel's envelope (msgtype, sequence, length), the frame head, and the path byte.
+const CHANNEL_OVERHEAD: usize = 6 + 4 + 1;
+const FORWARD_HEAD: usize = MIXNET_ID_SIZE + 1 + BOX_ID_SIZE + SIGNATURE_SIZE;
+pub const BOX_PLAINTEXT_MESH: usize =
+    LINK_MDU - max(REQUEST_OVERHEAD, CHANNEL_OVERHEAD) - FORWARD_HEAD - BOX_OVERHEAD;
+
+const fn max(a: usize, b: usize) -> usize {
+    if a > b { a } else { b }
+}
+
+/// Most box sizes a replica is given; each at most the mixnet's.
+pub const MAX_BOX_SIZES: usize = 8;
+
+/// The ciphertext sizes a replica takes for a comma separated list of profile names (`mesh`,
+/// `mixnet`) and plaintext sizes: those, and always the mesh's and the mixnet's, since boxes of
+/// either can arrive through a bridge or replication. 0 alone for any size, an empty list.
+pub fn box_ciphertext_sizes(text: &str) -> Result<Vec<usize>, String> {
+    let plain = text
+        .split(',')
+        .map(|n| match n {
+            "mesh" => Ok(BOX_PLAINTEXT_MESH),
+            "mixnet" => Ok(BOX_PLAINTEXT_MIXNET),
+            n => n.parse().map_err(|_| format!("{n:?} is neither a profile nor a size")),
+        })
+        .collect::<Result<Vec<usize>, _>>()?;
+    if plain[..] == [0] {
+        return Ok(vec![]);
+    }
+    if plain.len() > MAX_BOX_SIZES || plain.iter().any(|&n| n == 0 || n > BOX_PLAINTEXT_MIXNET) {
+        return Err(format!(
+            "at most {MAX_BOX_SIZES} box sizes, each from 1 to {BOX_PLAINTEXT_MIXNET}, or 0 alone for any"
+        ));
+    }
+    let mut ct: Vec<usize> =
+        plain.iter().chain(&[BOX_PLAINTEXT_MESH, BOX_PLAINTEXT_MIXNET]).map(|n| n + BOX_OVERHEAD).collect();
+    ct.sort_unstable();
+    ct.dedup();
+    Ok(ct)
+}
+
 // Pigeonhole replica error codes, as in pigeonhole/errors.go.
 pub const SUCCESS: u8 = 0;
 pub const NOT_FOUND: u8 = 1;
@@ -220,7 +273,7 @@ mod tests {
     fn box_vectors() {
         let dir = tempfile::tempdir().unwrap();
         for v in vectors()["boxes"].as_array().unwrap() {
-            let size = v["ciphertext_size"].as_u64().map(|n| n as usize);
+            let size = v["ciphertext_size"].as_u64().map(|n| n as usize).into_iter().collect();
             let e = crate::engine::Engine::new(
                 crate::store::Store::open(&dir.path().join("v.sqlite")).unwrap(),
                 [1; 16],
@@ -235,6 +288,19 @@ mod tests {
             };
             assert_eq!(e.verify(&q) as u64, v["expect"].as_u64().unwrap(), "{}", v["name"]);
         }
+    }
+
+    #[test]
+    fn a_mesh_box_goes_in_one_link_packet() {
+        assert_eq!(BOX_PLAINTEXT_MESH, 267);
+        let forward = |n: usize| {
+            [&[crate::channel::FORWARD][..], &[0; MIXNET_ID_SIZE], &encode_write(&[0; 32], &[0; 64], &vec![0; n + BOX_OVERHEAD])].concat()
+        };
+        let f = forward(BOX_PLAINTEXT_MESH);
+        assert_eq!(crate::channel::split(1, &f).unwrap().len(), 1);
+        assert_eq!(f[1..].len() + REQUEST_OVERHEAD, LINK_MDU, "request mode fills the packet");
+        let reply = encode_reply(&Reply { code: SUCCESS, found: Some((vec![0; 64], vec![0; BOX_PLAINTEXT_MESH + BOX_OVERHEAD])) });
+        assert_eq!(crate::channel::split(1, &reply).unwrap().len(), 1);
     }
 
     #[test]

@@ -12,13 +12,15 @@ from hpqc.bacap.stateless import ReadCap, WriteCap
 
 from . import wire
 
-DEFAULT_BOX = 1000
-
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="replica_rns", description=__doc__)
     p.add_argument("--config", help="Reticulum config directory")
-    p.add_argument("--box-size", type=int, default=DEFAULT_BOX, help="box plaintext size in bytes, the same on every replica and the mixnet")
+    p.add_argument("--box-size", type=wire.parse_box_sizes, default=(wire.BOX_PLAINTEXT_MESH,),
+                   help="box plaintext sizes, comma separated, each a profile (mesh, %d bytes, the default; mixnet, %d) "
+                   "or a size in bytes, at most %d and none over %d. A replica takes these and always the mesh and "
+                   "mixnet sizes, 0 alone for any size; a client pads to the first"
+                   % (wire.BOX_PLAINTEXT_MESH, wire.BOX_PLAINTEXT_MIXNET, wire.MAX_BOX_SIZES, wire.BOX_PLAINTEXT_MIXNET))
     p.add_argument("-v", "--verbose", action="count", default=0)
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -74,7 +76,9 @@ def main(argv=None) -> int:
 
     from .client import Client
 
-    c = Client(a.config, a.box_size, loglevel=loglevel, mode=a.mode)
+    if not a.box_size:
+        p.error("a client needs a box size")
+    c = Client(a.config, a.box_size[0], loglevel=loglevel, mode=a.mode)
     if not c.wait_for_replica():
         print("no replica reachable", file=sys.stderr)
         return 1

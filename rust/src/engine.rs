@@ -86,7 +86,8 @@ pub struct Engine {
     pub mixnet: Vec<u8>,
     /// On a bridge, whether every box goes into the mixnet, or only those clients write here.
     pub forward_all: bool,
-    box_ciphertext_size: Option<usize>,
+    /// Empty takes any size, for a bridge that defers to the mixnet replica's geometry check.
+    box_ciphertext_sizes: Vec<usize>,
     peers: Mutex<HashMap<Dst, Peer>>,
     synced: Mutex<HashSet<Dst>>,
     /// A fixed time for tests; the wall clock when `None`.
@@ -104,7 +105,7 @@ impl Engine {
         store: Store,
         self_dest: [u8; 16],
         self_identity: [u8; 16],
-        box_ciphertext_size: Option<usize>,
+        box_ciphertext_sizes: Vec<usize>,
         is_bridge: bool,
     ) -> Engine {
         let mixnet = if is_bridge { wire::mixnet_id("") } else { Vec::new() };
@@ -115,7 +116,7 @@ impl Engine {
             is_bridge,
             mixnet,
             forward_all: true,
-            box_ciphertext_size,
+            box_ciphertext_sizes,
             peers: Mutex::new(HashMap::from([(self_dest.to_vec(), me)])),
             synced: Mutex::default(),
             clock: Mutex::new(None),
@@ -219,7 +220,12 @@ impl Engine {
         let Query::Write { box_id, signature, ciphertext } = q else {
             return wire::INVALID_PAYLOAD;
         };
-        if !ciphertext.is_empty() && self.box_ciphertext_size.is_some_and(|n| n != ciphertext.len()) {
+        let (n, sizes) = (ciphertext.len(), &self.box_ciphertext_sizes);
+        if n != 0 && !sizes.is_empty() && !sizes.contains(&n) {
+            log::info!(
+                "pigeonhole: box {} refused: ciphertext of {n} bytes, this replica takes {sizes:?}",
+                hex::encode(&box_id[..8])
+            );
             return wire::INVALID_PAYLOAD;
         }
         match MessageBoxIndex::verify_box(box_id, ciphertext, signature) {
@@ -577,7 +583,7 @@ mod tests {
             Store::open(&dir.join(format!("{name}.sqlite"))).unwrap(),
             me,
             ident(&me).try_into().unwrap(),
-            Some(BOX + 4 + 16),
+            vec![BOX + 4 + 16],
             bridge,
         );
         *e.clock.lock().unwrap() = Some(1000.0);
@@ -593,6 +599,10 @@ mod tests {
     }
 
     fn seal_with(wc: &WriteCap, tomb: bool) -> (BoxId, Vec<u8>, Vec<u8>) {
+        seal_sized(wc, tomb, BOX)
+    }
+
+    fn seal_sized(wc: &WriteCap, tomb: bool, size: usize) -> (BoxId, Vec<u8>, Vec<u8>) {
         let rc = wc.read_cap().to_bytes();
         let pos = wc.position_at(&MessageBoxIndex::from_bytes(&rc[32..]).unwrap()).unwrap();
         if tomb {
@@ -600,7 +610,7 @@ mod tests {
             return (b, s.to_vec(), vec![]);
         }
         let mut padded = vec![0, 0, 0, 2, b'y', b'o'];
-        padded.resize(BOX + 4, 0);
+        padded.resize(size + 4, 0);
         let (b, ct, s) = pos.encrypt(CTX, &padded).unwrap();
         (b, s.to_vec(), ct)
     }
@@ -734,6 +744,84 @@ mod tests {
         bad[0] ^= 1;
         eb.handle_write(&wire::encode_write(&b1, &bad, &c1), &[], None);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn both_box_profiles_are_stored_and_carried_to_the_mixnet_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = d(b"me");
+        let (big, mesh) = (wire::BOX_PLAINTEXT_MIXNET, wire::BOX_PLAINTEXT_MESH);
+        let sizes = wire::box_ciphertext_sizes("mesh").unwrap();
+        assert_eq!(sizes, [287, 1569]);
+        assert_eq!(wire::box_ciphertext_sizes("mixnet,mesh,1000").unwrap(), [287, 1020, 1569]);
+        let mx = MixnetRef::default();
+        let net = Mesh::default().at(&me);
+        net.mixnets.lock().unwrap().insert(me.to_vec(), mx.clone());
+        let wc = || WriteCap::generate(&mut UnwrapErr(getrandom::SysRng));
+        for sizes in [sizes, vec![]] {
+            let path = dir.path().join(format!("e{}.sqlite", sizes.len()));
+            let e = Engine::new(Store::open(&path).unwrap(), me, [1; 16], sizes.clone(), true);
+            let sent = [seal_sized(&wc(), false, big), seal_sized(&wc(), false, mesh)];
+            for (b, s, c) in &sent {
+                assert_eq!(e.handle_write(&wire::encode_write(b, s, c), &[], None), [wire::SUCCESS]);
+            }
+            e.forward_due(&[], &net).await.unwrap();
+            for (b, s, c) in &sent {
+                assert_eq!(mx.lock().unwrap().boxes[b], (s.clone(), c.clone()));
+                assert!(e.store.queued(b).unwrap().is_empty());
+            }
+            for size in [big, mesh] {
+                let (b, s, c) = seal_sized(&wc(), false, size);
+                mx.lock().unwrap().boxes.insert(b, (s.clone(), c.clone()));
+                let r = wire::decode_reply(&e.handle_read(&wire::encode_read(&b), &[], &net).await.unwrap()).unwrap();
+                assert_eq!(r.found, Some((s, c.clone())));
+                assert_eq!(e.store.get(&b).unwrap().unwrap().payload, c);
+            }
+            let (b, s, c) = seal_sized(&wc(), false, 999);
+            let want = if sizes.is_empty() { wire::SUCCESS } else { wire::INVALID_PAYLOAD };
+            assert_eq!(e.handle_write(&wire::encode_write(&b, &s, &c), &[], None), [want]);
+        }
+        // A size not on the list is refused; a tombstone has no payload to size.
+        let e = Engine::new(Store::open(&dir.path().join("l.sqlite")).unwrap(), me, [1; 16], vec![mesh + 20], false);
+        let (b, s, c) = seal_sized(&wc(), false, big);
+        assert_eq!(e.handle_write(&wire::encode_write(&b, &s, &c), &[], None), [wire::INVALID_PAYLOAD]);
+        let (b, s, c) = seal_sized(&wc(), true, mesh);
+        assert_eq!(e.handle_write(&wire::encode_write(&b, &s, &c), &[], None), [wire::SUCCESS]);
+        assert_eq!(wire::box_ciphertext_sizes("0"), Ok(vec![]));
+        assert_eq!(wire::box_ciphertext_sizes(&["100"; 8].join(",")), Ok(vec![120, 287, 1569]));
+        for bad in ["0,400", "-1", "x", "", "Mesh", "1550", &["100"; 9].join(",")] {
+            assert!(wire::box_ciphertext_sizes(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// Boxes of another mesh's size reach this one by replication: stored and served beside
+    /// its own, and refused, not retried, by a replica that does not list the size.
+    #[tokio::test]
+    async fn mixed_sizes_in_one_store_and_across_replication() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (d(b"aa"), d(b"bb"));
+        let net = Mesh::default();
+        for (me, other, sizes) in [(a, b, "mesh,1000"), (b, a, "mesh")] {
+            let sizes = wire::box_ciphertext_sizes(sizes).unwrap();
+            let e = Engine::new(Store::open(&dir.path().join(hex::encode(me))).unwrap(), me, ident(&me).try_into().unwrap(), sizes, false);
+            e.heard(&other, &ident(&other), false, b"");
+            net.engines.lock().unwrap().insert(me.to_vec(), Arc::new(e));
+        }
+        let (ea, eb) = (net.get(&a).unwrap(), net.get(&b).unwrap());
+        let wc = || WriteCap::generate(&mut UnwrapErr(getrandom::SysRng));
+        let boxes: Vec<_> = [wire::BOX_PLAINTEXT_MESH, wire::BOX_PLAINTEXT_MIXNET, 1000].map(|n| seal_sized(&wc(), false, n)).into();
+        for (bx, s, c) in &boxes {
+            assert_eq!(ea.handle_write(&wire::encode_write(bx, s, c), &[b.to_vec()], None), [wire::SUCCESS]);
+            let r = wire::decode_reply(&ea.handle_peek(&wire::encode_read(bx), &[], &net.at(&a)).await.unwrap()).unwrap();
+            assert_eq!(r.found, Some((s.clone(), c.clone())));
+        }
+        ea.forward_due(&[b.to_vec()], &net.at(&a)).await.unwrap();
+        for (bx, s, c) in &boxes[..2] {
+            let got = eb.store.get(bx).unwrap().unwrap();
+            assert_eq!((&got.signature, &got.payload), (s, c));
+        }
+        assert!(eb.store.get(&boxes[2].0).unwrap().is_none(), "1000 bytes is not on b's list");
+        assert!(ea.store.queued(&boxes[2].0).unwrap().is_empty(), "a refused box is not retried");
     }
 
     #[tokio::test]

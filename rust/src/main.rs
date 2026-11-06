@@ -24,9 +24,11 @@ struct Cli {
     /// Reticulum config directory
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Box plaintext size in bytes, the same on every replica and the mixnet
-    #[arg(long, default_value_t = 1000)]
-    box_size: usize,
+    /// Box plaintext sizes taken besides the mesh's (267 bytes) and the mixnet's (1549), which
+    /// are always taken: comma separated, each a profile (mesh, mixnet) or a size in bytes, at
+    /// most 8 and none over 1549; 0 alone for any size
+    #[arg(long, default_value = "mesh")]
+    box_size: String,
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
     #[command(subcommand)]
@@ -93,7 +95,10 @@ async fn main() {
     let o = replica::Options {
         config_dir,
         storage,
-        box_size: cli.box_size,
+        box_sizes: wire::box_ciphertext_sizes(&cli.box_size).unwrap_or_else(|e| {
+            eprintln!("replica_rns-rs: --box-size: {e}");
+            std::process::exit(2)
+        }),
         bridge_socket,
         mixnet,
         forward_all: forward == "all",

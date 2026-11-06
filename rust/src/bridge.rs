@@ -115,4 +115,27 @@ mod tests {
         }
         assert_eq!(b.read(&[1; 32]).await, Some(Reply::code(wire::NOT_FOUND)));
     }
+
+    /// Boxes of either profile reach the Katzenpost replica byte for byte.
+    #[tokio::test]
+    async fn carries_either_box_size_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bridge.sock");
+        let l = UnixListener::bind(&path).unwrap();
+        let got: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
+        let g = got.clone();
+        std::thread::spawn(move || {
+            let mut s = l.incoming().next().unwrap().unwrap();
+            while let Ok(q) = wire::read_frame(&mut s) {
+                g.lock().unwrap().push(q);
+                wire::write_frame(&mut s, &[wire::SUCCESS]).unwrap();
+            }
+        });
+        let b = Bridge::new(path, 1);
+        for n in [wire::BOX_PLAINTEXT_MIXNET, wire::BOX_PLAINTEXT_MESH] {
+            let ct = vec![n as u8; n + wire::BOX_OVERHEAD];
+            assert_eq!(b.write(&[7; 32], &[9; 64], &ct).await, Some(wire::SUCCESS));
+            assert_eq!(got.lock().unwrap().last().unwrap(), &wire::encode_write(&[7; 32], &[9; 64], &ct));
+        }
+    }
 }
