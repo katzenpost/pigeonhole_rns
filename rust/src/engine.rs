@@ -752,8 +752,8 @@ mod tests {
         let me = d(b"me");
         let (big, mesh) = (wire::BOX_PLAINTEXT_MIXNET, wire::BOX_PLAINTEXT_MESH);
         let sizes = wire::box_ciphertext_sizes("mesh").unwrap();
-        assert_eq!(sizes, [287, 1569]);
-        assert_eq!(wire::box_ciphertext_sizes("mixnet,mesh,1000").unwrap(), [287, 1020, 1569]);
+        assert_eq!(sizes, [276, 1569]);
+        assert_eq!(wire::box_ciphertext_sizes("mixnet,mesh,1000").unwrap(), [276, 1020, 1569]);
         let mx = MixnetRef::default();
         let net = Mesh::default().at(&me);
         net.mixnets.lock().unwrap().insert(me.to_vec(), mx.clone());
@@ -788,7 +788,7 @@ mod tests {
         let (b, s, c) = seal_sized(&wc(), true, mesh);
         assert_eq!(e.handle_write(&wire::encode_write(&b, &s, &c), &[], None), [wire::SUCCESS]);
         assert_eq!(wire::box_ciphertext_sizes("0"), Ok(vec![]));
-        assert_eq!(wire::box_ciphertext_sizes(&["100"; 8].join(",")), Ok(vec![120, 287, 1569]));
+        assert_eq!(wire::box_ciphertext_sizes(&["100"; 8].join(",")), Ok(vec![120, 276, 1569]));
         for bad in ["0,400", "-1", "x", "", "Mesh", "1550", &["100"; 9].join(",")] {
             assert!(wire::box_ciphertext_sizes(bad).is_err(), "{bad}");
         }

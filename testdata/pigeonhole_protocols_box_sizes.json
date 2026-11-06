@@ -1,0 +1,4 @@
+{
+ "about": "pigeonhole_protocols' mesh box size, from its testdata/box_sizes.json at 07c96c5a9dbb76261b23f0444d2f63e3536ba59d; a replica's default must take it.",
+ "mesh": {"plaintext": 256, "ciphertext": 276, "write_query": 373}
+}
