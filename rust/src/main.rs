@@ -24,7 +24,7 @@ struct Cli {
     /// Reticulum config directory
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Box plaintext sizes taken besides the mesh's (267 bytes) and the mixnet's (1549), which
+    /// Box plaintext sizes taken besides the mesh's (256 bytes) and the mixnet's (1549), which
     /// are always taken: comma separated, each a profile (mesh, mixnet) or a size in bytes, at
     /// most 8 and none over 1549; 0 alone for any size
     #[arg(long, default_value = "mesh")]

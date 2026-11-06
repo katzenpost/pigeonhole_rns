@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Box payload profiles: replicas take the sizes their mesh is configured
 with, and a bridge carries either to the Katzenpost side unchanged."""
+import json
 import os
 import socket
 import tempfile
@@ -43,8 +44,8 @@ def test_parse_box_sizes():
     assert wire.parse_box_sizes("1549") == (1549,)
     assert wire.parse_box_sizes("1549,400") == (1549, 400)
     assert wire.parse_box_sizes("0") == ()
-    assert wire.parse_box_sizes("mesh,mixnet") == (267, 1549)
-    assert wire.parse_box_sizes("mesh,1000") == (267, 1000)
+    assert wire.parse_box_sizes("mesh,mixnet") == (256, 1549)
+    assert wire.parse_box_sizes("mesh,1000") == (256, 1000)
     assert wire.parse_box_sizes(",".join(["100"] * wire.MAX_BOX_SIZES)) == (100,) * wire.MAX_BOX_SIZES
     for bad in ("0,400", "-1", "x", "", "Mesh", "1550", ",".join(["100"] * (wire.MAX_BOX_SIZES + 1))):
         with pytest.raises(ValueError):
@@ -52,13 +53,13 @@ def test_parse_box_sizes():
 
 
 def test_every_replica_takes_the_mesh_and_mixnet_sizes():
-    assert wire.ciphertext_sizes((MESH,)) == wire.ciphertext_sizes((MESH, BIG)) == (287, 1569)
-    assert wire.ciphertext_sizes((1000, 100)) == (120, 287, 1020, 1569)
+    assert wire.ciphertext_sizes((MESH,)) == wire.ciphertext_sizes((MESH, BIG)) == (276, 1569)
+    assert wire.ciphertext_sizes((1000, 100)) == (120, 276, 1020, 1569)
     assert wire.ciphertext_sizes(()) == ()
 
 
 def test_ciphertext_sizes():
-    assert len(seal(BIG)[2]) == 1569 and len(seal(MESH)[2]) == 287
+    assert len(seal(BIG)[2]) == 1569 and len(seal(MESH)[2]) == 276
 
 
 def request(path, data):
@@ -67,9 +68,9 @@ def request(path, data):
 
 
 def test_a_mesh_box_goes_in_one_link_packet():
-    assert RNS.Link.MDU == 431 and MESH == 267
+    assert RNS.Link.MDU == 431 and MESH == 256
     piece = RNS.Link.MDU - 6 - channel.HEADER.size  # RNS Channel's envelope, then the frame head
-    for size, fits in ((MESH, True), (MESH + 1, False)):
+    for size, fits in ((MESH, True), (MESH + 16, False)):
         box, sig, ct = seal(size)
         write = wire.encode_write(box, sig, ct)
         forward = wire.mixnet_id("x") + write
@@ -92,7 +93,7 @@ def test_both_profiles_are_stored_and_others_refused(tmp_path):
     box, sig, ct = seal(999)
     assert write(e, box, sig, ct) == wire.INVALID_PAYLOAD
     assert e.store.get(box) is None
-    assert logs == ["pigeonhole: box %s refused: ciphertext of 1019 bytes, this replica takes 287, 1569" % box.hex()[:16]]
+    assert logs == ["pigeonhole: box %s refused: ciphertext of 1019 bytes, this replica takes 276, 1569" % box.hex()[:16]]
 
 
 def test_a_mesh_alone_refuses_the_mixnet_box(tmp_path):
@@ -193,3 +194,10 @@ def test_mixed_sizes_in_one_store_and_across_replication(tmp_path):
     assert b.store.get(boxes[1000][0]) is None, "1000 bytes is not on b's list"
     assert a.store.queued(boxes[1000][0]) == set(), "a refused box is not retried"
 
+
+
+def test_mesh_is_pigeonhole_protocols_default():
+    path = os.path.join(os.path.dirname(__file__), "..", "testdata", "pigeonhole_protocols_box_sizes.json")
+    mesh = json.load(open(path))["mesh"]
+    box, sig, ct = seal(MESH)
+    assert (MESH, len(ct), len(wire.encode_write(box, sig, ct))) == (mesh["plaintext"], mesh["ciphertext"], mesh["write_query"])

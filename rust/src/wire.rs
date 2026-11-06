@@ -16,7 +16,8 @@ pub const SIGNATURE_SIZE: usize = 64;
 
 /// Box payload profiles, as in `wire.py`: a replica takes boxes of several plaintext sizes at
 /// once. A client length prefixes the plaintext (4 bytes) and pads it to one, and the AEAD adds a 16 byte tag; Box ID and signature sizes never change. The mixnet's is
-/// fixed by its Sphinx geometry. The mesh's is the largest whose write, and a replica's forward
+/// fixed by its Sphinx geometry. The mesh's is the largest multiple of 16, as pigeonhole_protocols
+/// writes by default, whose write, and a replica's forward
 /// of it, go in one Link packet at Reticulum's 500 byte MTU in either query mode; request mode,
 /// msgpack [timestamp, path hash, data], frames a query in more than Channel mode does.
 pub const BOX_OVERHEAD: usize = 4 + 16;
@@ -30,7 +31,7 @@ const REQUEST_OVERHEAD: usize = 1 + 9 + 2 + 16 + 3;
 const CHANNEL_OVERHEAD: usize = 6 + 4 + 1;
 const FORWARD_HEAD: usize = MIXNET_ID_SIZE + 1 + BOX_ID_SIZE + SIGNATURE_SIZE;
 pub const BOX_PLAINTEXT_MESH: usize =
-    LINK_MDU - max(REQUEST_OVERHEAD, CHANNEL_OVERHEAD) - FORWARD_HEAD - BOX_OVERHEAD;
+    (LINK_MDU - max(REQUEST_OVERHEAD, CHANNEL_OVERHEAD) - FORWARD_HEAD - BOX_OVERHEAD) / 16 * 16;
 
 const fn max(a: usize, b: usize) -> usize {
     if a > b { a } else { b }
@@ -292,13 +293,16 @@ mod tests {
 
     #[test]
     fn a_mesh_box_goes_in_one_link_packet() {
-        assert_eq!(BOX_PLAINTEXT_MESH, 267);
+        assert_eq!(BOX_PLAINTEXT_MESH, 256);
+        let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../testdata/pigeonhole_protocols_box_sizes.json");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+        assert_eq!(v["mesh"]["plaintext"], BOX_PLAINTEXT_MESH, "pigeonhole_protocols' default mesh box");
         let forward = |n: usize| {
             [&[crate::channel::FORWARD][..], &[0; MIXNET_ID_SIZE], &encode_write(&[0; 32], &[0; 64], &vec![0; n + BOX_OVERHEAD])].concat()
         };
         let f = forward(BOX_PLAINTEXT_MESH);
         assert_eq!(crate::channel::split(1, &f).unwrap().len(), 1);
-        assert_eq!(f[1..].len() + REQUEST_OVERHEAD, LINK_MDU, "request mode fills the packet");
+        assert!(f[1..].len() + REQUEST_OVERHEAD <= LINK_MDU && f[1..].len() + 16 + REQUEST_OVERHEAD > LINK_MDU);
         let reply = encode_reply(&Reply { code: SUCCESS, found: Some((vec![0; 64], vec![0; BOX_PLAINTEXT_MESH + BOX_OVERHEAD])) });
         assert_eq!(crate::channel::split(1, &reply).unwrap().len(), 1);
     }

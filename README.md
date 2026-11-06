@@ -192,7 +192,7 @@ client pads to the first size listed, `mesh` by default.
 
 | profile | plaintext | ciphertext | write query |
 |---|---|---|---|
-| `mesh` (the default) | 267 | 287 | 384 |
+| `mesh` (the default) | 256 | 276 | 373 |
 | `mixnet` | 1549 | 1569 | 1666 |
 
 A box is the 32 byte Box ID, the 64 byte signature and the ciphertext: the
@@ -200,18 +200,20 @@ plaintext with a 4 byte big endian length before it, zero padded, and a 16
 byte AEAD tag. Only the ciphertext's size differs between profiles; the
 query and reply encodings above do not change. `mixnet` is the Katzenpost
 box, fixed by the Sphinx geometry. `mesh` is derived from Reticulum's
-constants (`wire.py`, `rust/src/wire.rs`) as the largest box whose write, and
-a replica's forward of it (16 more bytes of mixnet id, one of path), go in a
-single Link packet at the 500 byte MTU in either query mode: the Link MDU of
-431 bytes less request mode's 31 byte msgpack framing, more than Channel
-mode's 11, less the forward's 113 byte head and the 20 bytes of box
-overhead. A client's write has 16 bytes to spare in request mode and 37 in
-Channel mode; a read reply is 32 bytes smaller still.
+constants (`wire.py`, `rust/src/wire.rs`) as the largest multiple of 16
+whose write, and a replica's forward of it (16 more bytes of mixnet id, one
+of path), go in a single Link packet at the 500 byte MTU in either query
+mode: the Link MDU of 431 bytes less request mode's 31 byte msgpack framing,
+more than Channel mode's 11, less the forward's 113 byte head and the 20
+bytes of box overhead, 267, rounded down. It is the size pigeonhole_protocols
+writes by default (`testdata/pigeonhole_protocols_box_sizes.json`). A
+client's write has 27 bytes to spare in request mode and 48 in Channel mode;
+a read reply is 32 bytes smaller still.
 
 A bridge carries boxes of every size it takes between the mesh and the
 Katzenpost replica unchanged; `0` leaves the check to the Katzenpost replica.
 The Katzenpost replica stores sizes besides its geometry's when given them
-in `BoxPayloadLengths`, so a bridged mixnet lists `mesh`'s 267 and any other
+in `BoxPayloadLengths`, so a bridged mixnet lists `mesh`'s 256 and any other
 size the bridge carries. A bridge adds
 `--bridge-socket /path/to/replica/bridge.sock`, the `BridgeSocket` of a
 Katzenpost replica on the same host, and `--mixnet <name>` and `--forward`
