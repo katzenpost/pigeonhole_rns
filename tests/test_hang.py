@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: © 2026 David Stainton
 # SPDX-License-Identifier: AGPL-3.0-only
-"""The two hangs pigeonhole_rns/quint/python_replica.qnt finds: a Link request's response that
-arrives before RNS registers the request, and a Channel whose TX ring holds a culled receipt."""
+"""The hangs the Quint models find: a Link request's response that arrives before RNS registers
+the request, and a Channel whose TX ring holds a culled receipt (pigeonhole_rns/quint), and a
+Channel that lost a query's frame (rust/quint)."""
 import time
 import types
 
@@ -74,4 +75,15 @@ def test_a_wedged_channel_closes_its_link_and_does_not_raise():
     link = ClosingLink()
     ep = channel.Endpoint(link, lambda *a: None)
     assert ep.send(1, b"reply") is False
+    assert link.status == RNS.Link.CLOSED
+
+
+def test_a_mode_2_query_that_times_out_closes_its_link(monkeypatch):
+    """A Channel that lost a query's frame delivers nothing more on that Link (rust/quint)."""
+    link = ClosingLink()
+    link.link_id = b"L" * 16
+    monkeypatch.setattr(channel, "Endpoint", lambda link, on_message, on_push: types.SimpleNamespace(link=link, send=lambda *a: True))
+    l = rnsio.Links(request_timeout=0.3)
+    monkeypatch.setattr(l, "_open", lambda dest: link)
+    assert l.channel_request(b"d" * 16, b"\x00q") is None
     assert link.status == RNS.Link.CLOSED

@@ -2,10 +2,13 @@
 
 `rust_replica.qnt` models mode 2 on one Link of the Rust replica (`src/replica.rs`
 `serve_channel`, `src/mesh.rs` `send_frames`) on tokio's multi-threaded runtime: worker tasks
-sending through Reticulum-rs's Channel, which holds its `outbound` tokio Mutex across a transmit,
-and the Channel's watcher task, which takes delivery proofs from a Link event broadcast of 16
-slots shared by every Link and ends when it lags. `rust_replica_main` is the code before the
-fix, `rust_replica_fixed` after it.
+sending through Reticulum-rs's Channel, which holds its `outbound` tokio Mutex across a
+transmit, and the Channel's watcher task, which takes delivery proofs from a Link event
+broadcast of 16 slots shared by every Link and ends when it lags, and its receiver task, which
+loses a query frame it lags past and then delivers nothing more on that Link.
+`rust_replica_main` is the code before the fixes, `rust_replica_fixed` after them: the replica
+closes a Link whose window stalls, and the client (`rnsio.channel_request`) one whose query
+timed out.
 
     quint run rust_replica.qnt --main rust_replica_fixed --invariant windowExact --witnesses wLagged wAnswered
     quint verify rust_replica.qnt --main rust_replica_main --backend tlc --temporal liveness

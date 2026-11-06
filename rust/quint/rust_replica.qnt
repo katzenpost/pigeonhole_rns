@@ -12,9 +12,14 @@
 // sees another proof, the window stays full, every send answers LinkNotReady, and the
 // queries on that Link wait out their 60 s, then fill the queue ("queue full").
 //
+// The Channel's receiver task reads the Link's payloads from a broadcast too, and one it lags
+// past is lost: a query frame lost there leaves a gap in the Channel's sequence, so it delivers
+// no later message on that Link either.
+//
 // Reticulum-rs is not changed here. The fix in send_frames gives up once the window has made
-// no progress for a stall bound, and serve_channel then closes the Link, so its client opens a
-// fresh Link, with a fresh Channel and watcher, and asks again.
+// no progress for a stall bound, and serve_channel then closes the Link; a client whose query
+// times out closes its Link too (rnsio.channel_request). Either way the client opens a fresh
+// Link, with a fresh Channel and tasks, and asks again.
 //
 // Locks: outbound -> link and outbound -> transport handler inside Reticulum-rs, handler ->
 // link when it routes packets; the replica's own std Mutexes (replies, flags, subs, pushers)
@@ -29,7 +34,7 @@ module rust_replica {
   const SLOTS: int
   const NOISE: int
 
-  // A worker: "wait" (has a reply to send), "tx" (holds outbound, transmitting), "done".
+  // A query: "net" (on its way to the replica), then its worker: "wait" (has a reply to send), "tx" (holds outbound, transmitting), "done".
   // A reply's proof: "none", "inflight" (on the wire back), "seen" (handled by the watcher).
   // The watcher: "recv", "lock" (has a proof, wants outbound), "dead".
   // Events in the broadcast: a query's proof, or 0 for another Link's event.
@@ -42,6 +47,7 @@ module rust_replica {
     ev: int,
     buf: List[int],
     lagged: bool,
+    rxGap: bool,
     noise: int,
   }
 
@@ -59,9 +65,31 @@ module rust_replica {
   // The Link closes and the client asks again on a new one.
   pure def reopen(st: State): State = {
     ...st,
-    worker: st.worker.keys().mapBy(q => if (st.worker.get(q) == "done") "done" else "wait"),
+    worker: st.worker.keys().mapBy(q => if (st.worker.get(q) == "done") "done" else "net"),
     proof: st.proof.keys().mapBy(_ => "none"),
-    outstanding: 0, holder: NONE, watcher: "recv", ev: 0, buf: List(), lagged: false,
+    outstanding: 0, holder: NONE, watcher: "recv", ev: 0, buf: List(), lagged: false, rxGap: false,
+  }
+
+  // The Channel delivers the query to serve_channel's queue, unless a lost frame left a gap.
+  action qArrive(q: int): bool = all {
+    s.worker.get(q) == "net",
+    not(s.rxGap),
+    s' = { ...s, worker: s.worker.set(q, "wait") },
+  }
+
+  // spawn_receiver lags past the query's frame, with another Link's payloads crowding it out.
+  action qLost(q: int): bool = all {
+    s.worker.get(q) == "net",
+    s.noise > 0,
+    s' = { ...s, noise: s.noise - 1, rxGap: true },
+  }
+
+  // With the fix: the client's query times out with no answer coming, and it closes the Link.
+  action clientTimeout: bool = all {
+    FIXED,
+    s.rxGap,
+    QUERIES.exists(q => s.worker.get(q) == "net"),
+    s' = reopen(s),
   }
 
   // send_frames -> Channel::send: outbound.lock().await, then is_ready_to_send. A full window
@@ -120,15 +148,16 @@ module rust_replica {
 
   action init: bool = all {
     s' = {
-      worker: QUERIES.mapBy(_ => "wait"),
+      worker: QUERIES.mapBy(_ => "net"),
       proof: QUERIES.mapBy(_ => "none"),
-      outstanding: 0, holder: NONE, watcher: "recv", ev: 0, buf: List(), lagged: false, noise: NOISE,
+      outstanding: 0, holder: NONE, watcher: "recv", ev: 0, buf: List(), lagged: false, rxGap: false, noise: NOISE,
     },
   }
 
   action step: bool = any {
     nondet q = QUERIES.oneOf()
-    any { wLock(q), wTx(q), peerProof(q) },
+    any { qArrive(q), qLost(q), wLock(q), wTx(q), peerProof(q) },
+    clientTimeout,
     otherLink,
     watcherRecv,
     watcherProof,
@@ -151,6 +180,7 @@ module rust_replica {
   temporal liveness = step.weakFair(Set(s)) implies eventually(allAnswered)
 
   val wLagged: bool = s.watcher == "dead"
+  val wGap: bool = s.rxGap
   val wAnswered: bool = allAnswered
 }
 

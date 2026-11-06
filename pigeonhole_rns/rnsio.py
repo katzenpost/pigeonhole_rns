@@ -182,9 +182,14 @@ class Links:
                 deadline = time.time() + self.request_timeout
                 if not ep.send(rid, data, self.request_timeout):
                     return None
-                # A Link closed under the query fails it at once; the next one opens a new Link.
+                # A Link closed under the query fails it at once, and one whose query timed out
+                # is closed, as its Channel may have lost a frame for good (rust/quint); the next
+                # query opens a new Link.
                 while not slot[0].wait(0.25):
-                    if link.status == RNS.Link.CLOSED or time.time() > deadline:
+                    if link.status == RNS.Link.CLOSED:
+                        return None
+                    if time.time() > deadline:
+                        link.teardown()
                         return None
                 return slot[1]
             finally:
