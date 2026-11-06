@@ -130,14 +130,17 @@ class Endpoint:
         frames = split(request_id, data, self.piece_size(), cls)
         deadline = time.time() + timeout
         with self._send_lock:
-            for f in frames:
-                while not self.channel.is_ready_to_send():
-                    if self.link.status == RNS.Link.CLOSED or time.time() > deadline:
-                        return False
-                    time.sleep(0.01)
-                try:
+            try:
+                for f in frames:
+                    while not self.channel.is_ready_to_send():
+                        if self.link.status == RNS.Link.CLOSED or time.time() > deadline:
+                            return False
+                        time.sleep(0.01)
                     self.channel.send(f)
-                except Exception as e:
-                    RNS.log("pigeonhole: channel send: %s" % e, RNS.LOG_DEBUG)
-                    return False
+            except Exception as e:
+                # Once Transport culls a receipt still in the TX ring, RNS raises here on every
+                # call; a new Link starts with a clean Channel (pigeonhole_rns/quint).
+                RNS.log("pigeonhole: channel send: %s, closing the link" % e, RNS.LOG_WARNING)
+                self.link.teardown()
+                return False
         return True
