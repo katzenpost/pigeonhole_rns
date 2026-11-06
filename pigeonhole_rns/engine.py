@@ -185,6 +185,12 @@ class Engine:
             self.on_stored(box_id)
         return code
 
+    def announced(self, q: wire.Query, reachable: Iterable[bytes]) -> int:
+        """A box the local Katzenpost replica stored and streamed to this
+        bridge, tombstones too: taken as one pulled from its mixnet, so it
+        replicates and is pushed but is never written back there."""
+        return self.accept(q, reachable, origin=self.mixnet)
+
     def handle_forward(self, data: bytes, reachable: Iterable[bytes], sender: Optional[bytes]) -> bytes:
         """A write prefixed with the mixnet the box came from. The origin
         is kept only from a known replica."""

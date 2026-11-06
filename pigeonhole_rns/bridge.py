@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: © 2026 David Stainton
 # SPDX-License-Identifier: AGPL-3.0-only
 """The mesh side of a bridge: a client of the Katzenpost replica's bridge
-socket on the same host, speaking the same read and write messages."""
+socket on the same host, speaking the same read and write messages, and
+subscribed to the boxes it stores."""
 
 from __future__ import annotations
 
 import socket
 import threading
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from . import wire
 
@@ -23,6 +24,7 @@ class BridgeSocket:
         self._idle: List[socket.socket] = []
         self._slots = threading.BoundedSemaphore(conns)
         self._mu = threading.Lock()
+        self._stream: Optional[socket.socket] = None
 
     def _connect(self) -> socket.socket:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -70,8 +72,37 @@ class BridgeSocket:
         except wire.WireError:
             return None
 
+    def stream(self, since_epoch: int, on_announce: Callable[[int, wire.Query], None]) -> None:
+        """Subscribes on a connection of its own and calls on_announce with
+        the replica epoch and box of each announce, every box stored in a
+        kept epoch from since_epoch then each newly stored, until the stream
+        ends with OSError, EOFError or WireError."""
+        s = self._connect()
+        s.settimeout(None)  # quiet while nothing is stored
+        with self._mu:
+            self._stream = s
+        try:
+            wire.write_frame(s, wire.encode_subscribe(since_epoch))
+            while True:
+                raw = wire.read_frame(s)
+                try:
+                    epoch, q = wire.decode_announce(raw)
+                except wire.WireError:
+                    continue
+                on_announce(epoch, q)
+        finally:
+            with self._mu:
+                self._stream = None
+            s.close()
+
     def close(self) -> None:
         with self._mu:
             idle, self._idle = self._idle, []
+            stream = self._stream
         for s in idle:
             s.close()
+        if stream is not None:
+            try:
+                stream.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass

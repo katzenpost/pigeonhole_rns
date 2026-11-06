@@ -62,7 +62,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: katzenpost/katzenpost
-          ref: reticulum-bridge
+          ref: main
           path: katzenpost
       - run: cmp testdata/bridge_socket_vectors.json katzenpost/replica/testdata/bridge_socket_vectors.json
 
@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: katzenpost/katzenpost
-          ref: reticulum-bridge
+          ref: main
           path: katzenpost
       - uses: actions/setup-go@v5
         with:

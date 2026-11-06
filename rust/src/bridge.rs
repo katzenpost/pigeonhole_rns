@@ -1,5 +1,6 @@
 //! The mesh side of a bridge, as `bridge.py`: a client of the Katzenpost replica's bridge
-//! socket on the same host, speaking the same read and write messages.
+//! socket on the same host, speaking the same read and write messages, and subscribed to the
+//! boxes it stores.
 
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -8,7 +9,7 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 
-use crate::wire::{self, BoxId, Reply};
+use crate::wire::{self, BoxId, Query, Reply};
 
 /// Up to `conns` connections, each carrying one query at a time, so a slow read proxied to
 /// other shards does not hold up the rest. The Katzenpost replica serves each connection on
@@ -65,6 +66,21 @@ impl Bridge {
     pub async fn read(&self, box_id: &BoxId) -> Option<Reply> {
         wire::decode_reply(&self.exchange(wire::encode_read(box_id)).await?)
     }
+
+    /// Subscribes on a connection of its own and sends `tx` the replica epoch and box of each
+    /// announce, every box stored in a kept epoch from `since_epoch` then each newly stored,
+    /// until the stream ends or `tx` closes. Blocking.
+    pub fn stream(&self, since_epoch: u64, tx: &tokio::sync::mpsc::Sender<(u64, Query)>) -> std::io::Result<()> {
+        let mut s = UnixStream::connect(&self.path)?;
+        wire::write_frame(&mut s, &wire::encode_subscribe(since_epoch))?;
+        loop {
+            if let Some(a) = wire::decode_announce(&wire::read_frame(&mut s)?)
+                && tx.blocking_send(a).is_err()
+            {
+                return Ok(());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -114,6 +130,34 @@ mod tests {
             s.shutdown(std::net::Shutdown::Both).unwrap();
         }
         assert_eq!(b.read(&[1; 32]).await, Some(Reply::code(wire::NOT_FOUND)));
+    }
+
+    /// A stream carries every announce, skips a malformed one, and ends when the replica hangs
+    /// up.
+    #[tokio::test]
+    async fn stream_announces_until_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bridge.sock");
+        let l = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            let mut s = l.incoming().next().unwrap().unwrap();
+            assert_eq!(wire::read_frame(&mut s).unwrap(), wire::encode_subscribe(5));
+            let tombstone = |epoch: u64, id: u8| [&epoch.to_be_bytes()[..], &[id; 32], &[0; 64]].concat();
+            for a in [tombstone(7, 1), vec![3; 9], tombstone(8, 2)] {
+                wire::write_frame(&mut s, &a).unwrap();
+            }
+        });
+        let b = Arc::new(Bridge::new(path, 1));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let bb = b.clone();
+        let reader = tokio::task::spawn_blocking(move || bb.stream(5, &tx));
+        let mut got = vec![];
+        while let Some((epoch, q)) = rx.recv().await {
+            got.push(epoch);
+            assert!(matches!(q, Query::Write { ciphertext, .. } if ciphertext.is_empty()));
+        }
+        assert_eq!(got, [7, 8]);
+        assert_eq!(reader.await.unwrap().unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
     /// Boxes of either profile reach the Katzenpost replica byte for byte.

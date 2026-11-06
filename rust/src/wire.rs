@@ -10,6 +10,8 @@ use std::io::{self, Read, Write};
 
 pub const READ: u8 = 0;
 pub const WRITE: u8 = 1;
+/// Bridge socket only: turns the connection into a stream of announces.
+pub const SUBSCRIBE: u8 = 2;
 pub const BOX_ID_SIZE: usize = 32;
 pub const SIGNATURE_SIZE: usize = 64;
 
@@ -119,6 +121,16 @@ pub fn encode_read(box_id: &BoxId) -> Vec<u8> {
 
 pub fn encode_write(box_id: &BoxId, signature: &[u8], ciphertext: &[u8]) -> Vec<u8> {
     [&[WRITE][..], box_id, signature, ciphertext].concat()
+}
+
+pub fn encode_subscribe(since_epoch: u64) -> Vec<u8> {
+    [&[SUBSCRIBE][..], &since_epoch.to_be_bytes()].concat()
+}
+
+/// A box the Katzenpost replica stored: its replica epoch, then the box as a write carries it.
+pub fn decode_announce(data: &[u8]) -> Option<(u64, Query)> {
+    let epoch = u64::from_be_bytes(data.get(..8)?.try_into().unwrap());
+    Some((epoch, decode_query(&[&[WRITE][..], &data[8..]].concat())?))
 }
 
 pub fn decode_query(data: &[u8]) -> Option<Query> {
@@ -246,6 +258,27 @@ mod tests {
             assert_eq!(read_frame(&mut &framed(&payload)[..]).unwrap(), payload);
             assert_eq!(decode_query(&payload), Some(want));
         }
+    }
+
+    #[test]
+    fn subscribe_vectors() {
+        for v in vectors()["subscribe"].as_array().unwrap() {
+            let payload = encode_subscribe(v["since"].as_u64().unwrap());
+            assert_eq!(payload, hx(v, "payload"), "{}", v["name"]);
+            assert_eq!(framed(&payload), hx(v, "frame"));
+        }
+    }
+
+    #[test]
+    fn announce_vectors() {
+        for v in vectors()["announces"].as_array().unwrap() {
+            let payload = hx(v, "payload");
+            assert_eq!(framed(&payload), hx(v, "frame"), "{}", v["name"]);
+            let want = Query::Write { box_id: hx(v, "box_id").try_into().unwrap(), signature: hx(v, "signature"), ciphertext: hx(v, "ciphertext") };
+            assert_eq!(decode_announce(&payload), Some((v["epoch"].as_u64().unwrap(), want)));
+        }
+        assert_eq!(decode_announce(&[0; 7]), None);
+        assert_eq!(decode_announce(&[0; 8 + 32 + 63]), None);
     }
 
     #[test]

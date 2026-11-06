@@ -14,13 +14,15 @@ from __future__ import annotations
 import hashlib
 import struct
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import RNS
 from RNS.vendor import umsgpack
 
 READ = 0
 WRITE = 1
+# Bridge socket only: turns the connection into a stream of announces.
+SUBSCRIBE = 2
 
 BOX_ID_SIZE = 32
 SIGNATURE_SIZE = 64
@@ -122,6 +124,18 @@ def encode_write(box_id: bytes, signature: bytes, ciphertext: bytes) -> bytes:
     if len(signature) != SIGNATURE_SIZE:
         raise WireError("signature must be 64 bytes")
     return bytes([WRITE]) + box_id + signature + ciphertext
+
+
+def encode_subscribe(since_epoch: int) -> bytes:
+    return bytes([SUBSCRIBE]) + struct.pack(">Q", since_epoch)
+
+
+def decode_announce(data: bytes) -> Tuple[int, Query]:
+    """A box the Katzenpost replica stored: its replica epoch, then the box
+    as a write carries it."""
+    if len(data) < 8:
+        raise WireError("announce too short")
+    return struct.unpack(">Q", data[:8])[0], decode_query(bytes([WRITE]) + data[8:])
 
 
 def decode_query(data: bytes) -> Query:

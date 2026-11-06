@@ -33,6 +33,8 @@ const FORWARD_INTERVAL: Duration = Duration::from_secs(2);
 const HANDOFF_INTERVAL: Duration = Duration::from_secs(30);
 /// The longest wait between GC runs, so a clock jump is caught within it.
 const GC_INTERVAL: Duration = Duration::from_secs(3600);
+/// Before subscribing again to the Katzenpost replica after its stream ends.
+const STREAM_RETRY: Duration = Duration::from_secs(5);
 // Announce flags: bridge, serves mode 2, serves the replica paths in mode 2, no Link requests,
 // serves push.
 const BRIDGE_FLAG: u8 = 1;
@@ -365,6 +367,33 @@ pub async fn run(o: Options) -> Result<(), Box<dyn std::error::Error>> {
             sleep(GC_INTERVAL.min(Duration::from_secs_f64(rr.engine.till_next_epoch() + 1.0))).await;
         }
     });
+
+    // Each box the Katzenpost replica announces; when the stream ends, subscribe again from the
+    // last epoch seen. Boxes announced again are already held and go nowhere.
+    if r.bridge.is_some() {
+        let rr = r.clone();
+        tokio::spawn(async move {
+            let mut since = 0;
+            loop {
+                let (tx, mut rx) = mpsc::channel(64);
+                let rb = rr.clone();
+                let reader = tokio::task::spawn_blocking(move || rb.bridge.as_ref().unwrap().stream(since, &tx));
+                while let Some((epoch, q)) = rx.recv().await {
+                    since = since.max(epoch);
+                    let reach = rr.reachable();
+                    match rr.engine.announced(&q, &reach) {
+                        Ok(wire::SUCCESS) => rr.kick.notify_one(),
+                        Ok(_) => {}
+                        Err(e) => log::error!("pigeonhole: store: {e}"),
+                    }
+                }
+                if let Ok(Err(e)) = reader.await {
+                    log::debug!("pigeonhole: bridge stream: {e}");
+                }
+                sleep(STREAM_RETRY).await;
+            }
+        });
+    }
 
     log::info!("pigeonhole: replica {} up{}", hex::encode(self_dest), if r.bridge.is_some() { ", bridge" } else { "" });
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;

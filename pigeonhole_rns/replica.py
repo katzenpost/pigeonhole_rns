@@ -30,6 +30,8 @@ CHANNEL_QUEUE = 16
 CHANNEL_HANDLERS = 32
 # Announce flags: bridge, serves mode 2, serves the replica paths in mode 2, serves push.
 PUSH_FLAG = 16
+# Seconds before subscribing again to the Katzenpost replica after its stream ends.
+STREAM_RETRY = 5.0
 
 class Replica:
     def __init__(
@@ -313,6 +315,26 @@ class Replica:
             if self._stop.wait(min(3600.0, self.engine.till_next_epoch() + 1)):
                 return
 
+    def _stream_loop(self) -> None:
+        """Takes each box the Katzenpost replica announces; when the stream
+        ends, subscribes again from the last epoch seen. Boxes announced
+        again are already held and go nowhere."""
+        since = 0
+
+        def announced(epoch: int, q: wire.Query) -> None:
+            nonlocal since
+            since = max(since, epoch)
+            if self.engine.announced(q, self._reachable()) == wire.SUCCESS:
+                self._kick.set()
+
+        while not self._stop.is_set():
+            try:
+                self.bridge.stream(since, announced)
+            except (OSError, EOFError, wire.WireError) as e:
+                RNS.log("pigeonhole: bridge stream: %s" % e, RNS.LOG_DEBUG)
+            if self._stop.wait(STREAM_RETRY):
+                return
+
     def _announce_loop(self) -> None:
         while True:
             self.announce()
@@ -320,7 +342,10 @@ class Replica:
                 return
 
     def start(self) -> None:
-        for fn in (self._announce_loop, self._forward_loop, self._handoff_loop, self._gc_loop):
+        loops = [self._announce_loop, self._forward_loop, self._handoff_loop, self._gc_loop]
+        if self.bridge is not None:
+            loops.append(self._stream_loop)
+        for fn in loops:
             threading.Thread(target=fn, daemon=True).start()
         RNS.log("pigeonhole: replica %s up%s" % (RNS.prettyhexrep(self.destination.hash), ", bridge" if self.bridge else ""), RNS.LOG_NOTICE)
 

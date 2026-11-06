@@ -45,6 +45,21 @@ def test_reply(v):
     assert (r.signature, r.ciphertext) == ((sig, ct) if sig is not None else (None, None))
 
 
+@pytest.mark.parametrize("v", VECTORS["subscribe"], ids=lambda v: v["name"])
+def test_subscribe(v):
+    payload = wire.encode_subscribe(v["since"])
+    assert payload.hex() == v["payload"]
+    assert frame(payload).hex() == v["frame"]
+
+
+@pytest.mark.parametrize("v", VECTORS["announces"], ids=lambda v: v["name"])
+def test_announce(v):
+    payload = bytes.fromhex(v["payload"])
+    assert frame(payload).hex() == v["frame"]
+    epoch, q = wire.decode_announce(payload)
+    assert (epoch, q.kind, q.box_id.hex(), q.signature.hex(), q.ciphertext.hex()) == (v["epoch"], wire.WRITE, v["box_id"], v["signature"], v["ciphertext"])
+
+
 @pytest.mark.parametrize("v", VECTORS["malformed"], ids=lambda v: v["name"])
 def test_malformed(v):
     with pytest.raises(wire.WireError):
