@@ -7,6 +7,7 @@ import os
 import socket
 import tempfile
 import threading
+import time
 
 from hpqc.bacap.stateless import WriteCap
 
@@ -23,11 +24,14 @@ CT = BOX + 4 + 16
 class FakeMixnet:
     """A Katzenpost bridge socket in front of one store: write once, a
     tombstone replaces a box, and every write is logged as (box id,
-    tombstone)."""
+    tombstone). A subscribed connection is announced every box held, then
+    each one stored."""
+
+    EPOCH = 2934
 
     def __init__(self, name):
         self.name = name
-        self.boxes, self.writes = {}, []
+        self.boxes, self.writes, self.streams, self.since = {}, [], [], []
         self.mu = threading.Lock()
         # tmp_path can exceed the 108 byte AF_UNIX path limit.
         self.path = os.path.join(tempfile.mkdtemp(prefix="mx"), "s")
@@ -47,8 +51,15 @@ class FakeMixnet:
     def _serve(self, c):
         try:
             while True:
-                q = wire.decode_query(wire.read_frame(c))
+                raw = wire.read_frame(c)
                 with self.mu:
+                    if raw[0] == wire.SUBSCRIBE:
+                        self.since.append(int.from_bytes(raw[1:], "big"))
+                        for box_id in self.boxes:
+                            self._announce(c, box_id)
+                        self.streams.append(c)
+                        return
+                    q = wire.decode_query(raw)
                     wire.write_frame(c, self._read(q) if q.kind == wire.READ else self._write(q))
         except (OSError, EOFError, wire.WireError):
             c.close()
@@ -64,11 +75,23 @@ class FakeMixnet:
         cur = self.boxes.get(q.box_id)
         if cur is not None and (cur[1] == b"" or q.ciphertext != b""):
             return wire.encode_reply(wire.SUCCESS if cur == (q.signature, q.ciphertext) else wire.ALREADY_EXISTS)
-        self.boxes[q.box_id] = (q.signature, q.ciphertext)
+        self.put(q.box_id, q.signature, q.ciphertext)
         return wire.encode_reply(wire.SUCCESS)
+
+    def put(self, box_id, sig, ct):
+        """Stores a box, as a mixnet client's write would, and announces it."""
+        self.boxes[box_id] = (sig, ct)
+        for c in self.streams:
+            self._announce(c, box_id)
+
+    def _announce(self, c, box_id):
+        sig, ct = self.boxes[box_id]
+        wire.write_frame(c, self.EPOCH.to_bytes(8, "big") + box_id + sig + ct)
 
     def close(self):
         self.l.close()
+        for c in self.streams:
+            c.close()
 
 
 class Mesh:
@@ -219,4 +242,105 @@ def test_two_bridges_to_one_mixnet_write_each_box_once(tmp_path):
     for n in ("a1", "a2"):
         assert BRIDGE not in m.e[n].store.queued(pulled[0])
     m.close()
+    mx.close()
+
+
+def stream(sock, since, f):
+    """Runs a stream on a thread of its own until it ends, as it does when its socket closes."""
+    def run():
+        try:
+            sock.stream(since, f)
+        except (OSError, EOFError):
+            pass
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t
+
+
+def wait_for(f, timeout=5.0):
+    end = time.monotonic() + timeout
+    while not f():
+        assert time.monotonic() < end, "timed out"
+        time.sleep(0.01)
+
+
+def test_streamed_boxes_and_tombstones_cross_to_another_mixnet(tmp_path):
+    mxa, mxb = FakeMixnet("A"), FakeMixnet("B")
+    m = Mesh(tmp_path, {"a": mxa, "b": mxb, "r": None})
+    pushed = []
+    m.e["r"].on_stored = pushed.append
+    caps = [WriteCap.generate() for _ in range(2)]
+    before, after = seal(caps[0], b"held before"), seal(caps[1], b"written after")
+    mxa.put(*before)
+    for n in "ab":
+        stream(m.sock[n], 0, lambda _, q, n=n: m.e[n].announced(q, m.reach(n)))
+    wait_for(lambda: len(mxa.streams) == 1 and len(mxb.streams) == 1)
+    mxa.put(*after)
+    wait_for(lambda: all(m.e["a"].store.get(b[0]) for b in (before, after)))
+    m.run()
+
+    for b in (before, after):
+        assert mxb.boxes[b[0]] == b[1:]
+        for n in "abr":
+            assert m.e[n].store.get(b[0]).origin == wire.mixnet_id("A")
+    assert before[0] in pushed and after[0] in pushed
+
+    t = tombstone(caps[0])
+    mxa.put(*t)
+    wait_for(lambda: m.e["a"].store.get(t[0]).is_tombstone)
+    m.run()
+    assert mxb.boxes[t[0]] == (t[1], b"")
+    assert m.e["r"].store.get(t[0]).is_tombstone
+
+    m.run(rounds=6)
+    assert mxa.writes == [], "nothing written back to its origin"
+    assert sorted(mxb.writes) == sorted([(before[0], False), (after[0], False), (t[0], True)])
+    m.close()
+    mxa.close()
+    mxb.close()
+
+
+def test_stream_ends_when_dropped_and_replays_on_resubscribe(tmp_path):
+    mx = FakeMixnet("A")
+    b = BridgeSocket(mx.path)
+    box = seal(WriteCap.generate(), b"x")
+    mx.put(*box)
+    got = []
+    t = stream(b, 0, lambda ep, q: got.append((ep, q.box_id, q.ciphertext)))
+    wait_for(lambda: got)
+    mx.streams.pop().shutdown(socket.SHUT_RDWR)
+    t.join(5)
+    assert not t.is_alive()
+    assert got == [(FakeMixnet.EPOCH, box[0], box[2])]
+    stream(b, FakeMixnet.EPOCH, lambda ep, q: got.append((ep, q.box_id, q.ciphertext)))
+    wait_for(lambda: len(got) == 2)
+    assert got[1] == got[0], "a box announced again"
+    b.close()
+    mx.close()
+
+
+def test_replica_resubscribes_from_the_last_epoch_seen(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from pigeonhole_rns import replica
+
+    monkeypatch.setattr(replica, "STREAM_RETRY", 0.05)
+    mx = FakeMixnet("A")
+    m = Mesh(tmp_path, {"a": mx, "r": None})
+    stub = SimpleNamespace(bridge=m.sock["a"], engine=m.e["a"], _reachable=lambda: m.reach("a"),
+                           _kick=threading.Event(), _stop=threading.Event())
+    t = threading.Thread(target=replica.Replica._stream_loop, args=(stub,), daemon=True)
+    t.start()
+    wait_for(lambda: mx.streams)
+    box = seal(WriteCap.generate(), b"x")
+    mx.put(*box)
+    wait_for(lambda: m.e["a"].store.get(box[0]) is not None)
+    assert stub._kick.is_set()
+    mx.streams.pop().shutdown(socket.SHUT_RDWR)
+    wait_for(lambda: len(mx.since) == 2)
+    assert mx.since == [0, FakeMixnet.EPOCH]
+    stub._stop.set()
+    m.close()
+    t.join(5)
+    assert not t.is_alive()
     mx.close()

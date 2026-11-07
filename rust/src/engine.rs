@@ -256,6 +256,13 @@ impl Engine {
         Ok(code)
     }
 
+    /// A box the local Katzenpost replica stored and streamed to this bridge, tombstones too:
+    /// taken as one pulled from its mixnet, so it replicates and is pushed but is never written
+    /// back there.
+    pub fn announced(&self, q: &Query, reachable: &[Dst]) -> Result<u8> {
+        self.accept(q, reachable, None, &self.mixnet)
+    }
+
     pub fn handle_write(&self, data: &[u8], reachable: &[Dst], sender: Option<&Dst>) -> Vec<u8> {
         self.write_from(data, reachable, sender, b"")
     }
@@ -1104,5 +1111,30 @@ mod tests {
         for n in [b"a1", b"a2"] {
             assert!(!m.e(n).store.queued(&pulled.0).unwrap().contains(BRIDGE));
         }
+    }
+
+    /// Boxes and tombstones the Katzenpost replica of mixnet A announces reach mixnet B and
+    /// every replica, and are never written back to A, even when announced again.
+    #[tokio::test]
+    async fn announced_boxes_and_tombstones_cross_to_another_mixnet() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mxa, mxb): (MixnetRef, MixnetRef) = Default::default();
+        let m = Bridged::new(dir.path(), &[(b"aa", Some(("A", &mxa))), (b"bb", Some(("B", &mxb))), (b"rr", None)]);
+        let c = cap();
+        let (b, t) = (seal_with(&c, false), seal_with(&c, true));
+        let q = |(id, s, ct): &(BoxId, Vec<u8>, Vec<u8>)| Query::Write { box_id: *id, signature: s.clone(), ciphertext: ct.clone() };
+        for x in [&b, &b] {
+            assert_eq!(m.e(b"aa").announced(&q(x), &m.reach(&d(b"aa"))).unwrap(), wire::SUCCESS);
+        }
+        m.run(4).await;
+        for n in [b"aa", b"bb", b"rr"] {
+            assert_eq!(m.e(n).store.get(&b.0).unwrap().unwrap().origin, wire::mixnet_id("A"));
+        }
+        assert_eq!(mxb.lock().unwrap().boxes[&b.0], (b.1.clone(), b.2.clone()));
+        assert_eq!(m.e(b"aa").announced(&q(&t), &m.reach(&d(b"aa"))).unwrap(), wire::SUCCESS);
+        m.run(4).await;
+        assert!(m.e(b"rr").store.get(&t.0).unwrap().unwrap().is_tombstone());
+        assert_eq!(mxb.lock().unwrap().boxes[&t.0], (t.1.clone(), vec![]));
+        assert!(mxa.lock().unwrap().writes.is_empty(), "nothing written back to its origin");
     }
 }

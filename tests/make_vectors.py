@@ -57,12 +57,17 @@ def main() -> None:
         "description": "Bridge socket between a Katzenpost replica and a Pigeonhole mesh replica: "
         "each message is a big endian u32 length then the payload. Queries: READ=0 | box_id(32); "
         "WRITE=1 | box_id(32) | signature(64) | ciphertext (empty for a tombstone). Replies: code(1) "
-        "and, for a found box, signature(64) | ciphertext. Boxes: what a replica answers a write "
-        "with, given the box ciphertext size.",
+        "and, for a found box, signature(64) | ciphertext. SUBSCRIBE=2 | since_epoch(u64 big endian) "
+        "turns the connection into a stream of announces, with no reply: epoch(u64 big endian) | "
+        "box_id(32) | signature(64) | ciphertext (empty for a tombstone), first every box stored in "
+        "a kept epoch at or after since_epoch, then each newly stored box. Boxes: what a replica "
+        "answers a write with, given the box ciphertext size.",
         "queries": [],
         "replies": [],
         "malformed": [],
         "boxes": [],
+        "subscribe": [],
+        "announces": [],
     }
     for name, payload, fields in [
         ("read", wire.encode_read(box), {"kind": wire.READ, "box_id": box.hex()}),
@@ -83,11 +88,20 @@ def main() -> None:
         if s is not None:
             e["signature"], e["ciphertext"] = s.hex(), c.hex()
         v["replies"].append(e)
+    epoch = 2934
+    for name, since in [("from_zero", 0), ("from_epoch", epoch)]:
+        payload = wire.encode_subscribe(since)
+        v["subscribe"].append({"name": name, "since": since, "payload": payload.hex(), "frame": frame(payload).hex()})
+    for name, c in [("box", ct), ("tombstone", b"")]:
+        payload = struct.pack(">Q", epoch) + box + sig + c
+        v["announces"].append({"name": name, "epoch": epoch, "box_id": box.hex(), "signature": sig.hex(), "ciphertext": c.hex(), "payload": payload.hex(), "frame": frame(payload).hex()})
     v["malformed"] = [
         {"name": "read_short", "payload": (bytes([wire.READ]) + box[:31]).hex()},
         {"name": "read_trailing", "payload": (bytes([wire.READ]) + box + b"x").hex()},
         {"name": "write_no_signature", "payload": (bytes([wire.WRITE]) + box + sig[:63]).hex()},
         {"name": "unknown_kind", "payload": (bytes([7]) + box).hex()},
+        {"name": "subscribe_short", "payload": (bytes([wire.SUBSCRIBE]) + epoch.to_bytes(7, "big")).hex()},
+        {"name": "subscribe_trailing", "payload": (bytes([wire.SUBSCRIBE]) + epoch.to_bytes(7, "big") + b"\0\0").hex()},
     ]
 
     cap = WriteCap.generate(seeded_rng(b"pigeonhole bridge vectors"))

@@ -44,12 +44,21 @@ every bridge to that mixnet. On top of replication:
 - A read that misses on a replica asks every replica it reaches, bridges
   asking their mixnets; the bridge that finds a box stores it and it
   replicates from there.
+- Each bridge subscribes to the boxes its Katzenpost replica stores, tombstones
+  included: the replica first announces every box it keeps, then each one as
+  it stores it, and the bridge stores each as pulled from its mixnet, so it
+  replicates and is pushed to subscribed clients. When the stream ends the
+  bridge subscribes again five seconds later from the last replica epoch it
+  saw; boxes announced again are already held. A Katzenpost replica stores,
+  and so announces, only the boxes it is a shard for, so a mixnet's boxes all
+  reach the mesh when its bridges sit on replicas covering every shard.
 
 `--forward all` (the default) writes every box into the mixnet;
 `--forward on-request` writes only boxes clients write to this bridge,
-while it still pulls for reads. A tombstone written directly on a mixnet
-does not cross to the mesh, since the bridge socket returns a tombstone
-without its signature; one written on the mesh reaches every mixnet.
+while it still pulls for reads. A tombstone written on a mixnet crosses to
+the mesh by the stream alone, since a read of one over the bridge socket
+returns it without its signature; one written on the mesh reaches every
+mixnet.
 
 The mixnet half of the bridge, a unix socket on the Katzenpost replica, is in
 the Katzenpost repository (`replica/bridge.go`).
@@ -110,7 +119,8 @@ again.
 A client on a Link can subscribe to the Box IDs it waits for, and the
 replica pushes each box down that Link when it stores it: written by a
 client, arriving from another replica by forward or sync, or pulled from the
-mixnet on a bridge. A client that never subscribes polls as before. All
+mixnet on a bridge, by a read or its stream. A client that never subscribes
+polls as before. All
 integers are big endian.
 
 Subscribe is mode 2 op 6, or Link request path `subscribe` with the same
