@@ -9,9 +9,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-use reticulum::channel::Message;
-use reticulum::error::RnsError;
-
 pub const MSGTYPE: u16 = 0x5048;
 pub const PUSH_MSGTYPE: u16 = 0x5049;
 /// A message's first byte: a read or a write query, as they begin, or a replica path followed
@@ -22,8 +19,8 @@ pub const FORWARD: u8 = 4;
 pub const PUSHED: u8 = 5;
 pub const MAX_PIECES: usize = 255;
 const HEADER: usize = 4;
-/// The Link MDU at the 500 byte MTU Reticulum-rs links run at, less Channel's 6 byte
-/// envelope and the frame header.
+/// The Link MDU at the default 500 byte MTU, less Channel's 6 byte envelope and the frame
+/// header.
 pub const PIECE: usize = crate::wire::LINK_MDU - 6 - HEADER;
 const REASSEMBLY_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -36,20 +33,16 @@ pub struct Frame {
     pub data: Vec<u8>,
 }
 
-impl Message for Frame {
-    fn unpack(b: &[u8], message_type: u16) -> Result<Self, RnsError> {
+impl Frame {
+    pub fn unpack(b: &[u8], message_type: u16) -> Option<Self> {
         if !matches!(message_type, MSGTYPE | PUSH_MSGTYPE) || b.len() < HEADER {
-            return Err(RnsError::ChannelError);
+            return None;
         }
-        Ok(Frame { msgtype: message_type, request_id: u16::from_be_bytes([b[0], b[1]]), index: b[2], count: b[3], data: b[HEADER..].to_vec() })
+        Some(Frame { msgtype: message_type, request_id: u16::from_be_bytes([b[0], b[1]]), index: b[2], count: b[3], data: b[HEADER..].to_vec() })
     }
 
-    fn pack(&self) -> Vec<u8> {
+    pub fn pack(&self) -> Vec<u8> {
         [&self.request_id.to_be_bytes()[..], &[self.index, self.count], &self.data].concat()
-    }
-
-    fn message_type(&self) -> u16 {
-        self.msgtype
     }
 }
 
