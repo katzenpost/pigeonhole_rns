@@ -4,7 +4,7 @@ version = "0.0.1"
 edition = "2024"
 rust-version = "1.89"
 authors = ["David Stainton"]
-description = "Pigeonhole storage replica daemon for Reticulum mesh networks, on Reticulum-rs"
+description = "Pigeonhole storage replica daemon for Reticulum mesh networks, on berlinmesh/reticulum"
 license = "AGPL-3.0-only"
 repository = "https://github.com/katzenpost/pigeonhole_rns"
 
@@ -13,8 +13,19 @@ name = "replica_rns-rs"
 path = "src/main.rs"
 
 [dependencies]
-# The same pins as katzenpost/pigeonhole_protocols.
-reticulum = { git = "https://github.com/BeechatNetworkSystemsLtd/Reticulum-rs", rev = "151e3b6c77a8c7d33fafa3971a084ae02510ef39" }
+# berlinmesh/reticulum, pinned: it moves fast.
+reticulum-announce = { git = "https://git.emcomm.cc/berlinmesh/reticulum", rev = "6669dc5d220e647510701599ed0292d4abd38715", features = ["rustcrypto"] }
+reticulum-channel = { git = "https://git.emcomm.cc/berlinmesh/reticulum", rev = "6669dc5d220e647510701599ed0292d4abd38715" }
+reticulum-client = { git = "https://git.emcomm.cc/berlinmesh/reticulum", rev = "6669dc5d220e647510701599ed0292d4abd38715" }
+reticulum-endpoint = { git = "https://git.emcomm.cc/berlinmesh/reticulum", rev = "6669dc5d220e647510701599ed0292d4abd38715" }
+reticulum-id = { git = "https://git.emcomm.cc/berlinmesh/reticulum", rev = "6669dc5d220e647510701599ed0292d4abd38715", features = ["rustcrypto"] }
+reticulum-iface = { git = "https://git.emcomm.cc/berlinmesh/reticulum", rev = "6669dc5d220e647510701599ed0292d4abd38715" }
+reticulum-ip-iface = { git = "https://git.emcomm.cc/berlinmesh/reticulum", rev = "6669dc5d220e647510701599ed0292d4abd38715" }
+reticulum-link = { git = "https://git.emcomm.cc/berlinmesh/reticulum", rev = "6669dc5d220e647510701599ed0292d4abd38715", features = ["rustcrypto"] }
+reticulum-msgpack = { git = "https://git.emcomm.cc/berlinmesh/reticulum", rev = "6669dc5d220e647510701599ed0292d4abd38715" }
+reticulum-packet = { git = "https://git.emcomm.cc/berlinmesh/reticulum", rev = "6669dc5d220e647510701599ed0292d4abd38715" }
+reticulum-router = { git = "https://git.emcomm.cc/berlinmesh/reticulum", rev = "6669dc5d220e647510701599ed0292d4abd38715" }
+# The same pin as katzenpost/pigeonhole_protocols.
 hpqc = { git = "https://github.com/katzenpost/hpqc", rev = "625d91f541006dc51176ce39d50c5139bce8723e" }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
@@ -26,12 +37,6 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
-pyo3 = { version = "0.30", features = ["auto-initialize"], optional = true }
-
-[features]
-# Link requests and Resources through Python RNS, to reach replicas that do not serve the
-# replica paths in mode 2.
-reticulum-py = ["dep:pyo3"]
 
 [dev-dependencies]
 getrandom = { version = "0.4", features = ["sys_rng"] }

@@ -75,7 +75,6 @@ def main() -> int:
     ap.add_argument("--replica-args", default="", help="extra arguments for the replica command")
     ap.add_argument("--rust", default="", help="comma separated replica numbers to run with the Rust replica, e.g. 1,3")
     ap.add_argument("--rust-bin", default="rust/target/release/replica_rns-rs", help="the Rust replica executable")
-    ap.add_argument("--rust-py", action="store_true", help="give the Rust replicas a Python Reticulum instance for Link requests (feature reticulum-py)")
     a = ap.parse_args()
     rust = {int(i) for i in a.rust.split(",") if i}
     n, late, victim = a.n, a.n - 1, 1
@@ -96,18 +95,9 @@ def main() -> int:
             f.write(REPLICA_CFG % (a.port + i, "".join(TO % (j, a.port + j) for j in peers)))
         log = open(os.path.join(run, "replica-%d.log" % i), "a")
         cmd = [os.path.abspath(a.rust_bin)] if i in rust else [sys.executable, "-m", "pigeonhole_rns.cli"]
-        extra = []
-        if i in rust and a.rust_py:
-            # The Python instance connects to the other replicas itself: Reticulum-rs, at the
-            # revision used, does not relay to a Python node on the last hop.
-            pd = os.path.join(run, "rns-py-%d" % i)
-            os.makedirs(pd, exist_ok=True)
-            with open(os.path.join(pd, "config"), "w") as f:
-                f.write(CLIENT_CFG % "".join(TO % (j, a.port + j) for j in range(n) if j != i))
-            extra = ["--py-config", pd]
         procs[i] = subprocess.Popen(
             cmd + ["--config", d, "--box-size", str(BOX), "replica",
-             "--storage", store(i), "--announce-interval", "5"] + extra + a.replica_args.split(),
+             "--storage", store(i), "--announce-interval", "5"] + a.replica_args.split(),
             stdout=log, stderr=subprocess.STDOUT, cwd=src, env=dict(os.environ, PYTHONPATH=src))
         time.sleep(1.0)
 

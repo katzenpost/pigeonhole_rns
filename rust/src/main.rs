@@ -1,14 +1,12 @@
-//! replica_rns-rs: a Pigeonhole storage replica for Reticulum, on Reticulum-rs. The store and
-//! command line of the Python `replica_rns replica`, speaking query mode 2 alone.
+//! replica_rns-rs: a Pigeonhole storage replica for Reticulum, on berlinmesh/reticulum. The
+//! store, query modes and command line of the Python `replica_rns replica`.
 
 mod bridge;
 mod channel;
 mod config;
 mod engine;
-mod mesh;
+mod net;
 mod push;
-#[cfg(feature = "reticulum-py")]
-mod pyfallback;
 mod replica;
 mod store;
 mod wire;
@@ -68,11 +66,6 @@ enum Cmd {
         /// MiB to leave free on the storage filesystem; 0 for none
         #[arg(long, default_value_t = 500)]
         min_free_storage_mib: u64,
-        /// The config directory of a Python Reticulum instance, to reach replicas that do not
-        /// serve the replica paths in mode 2 with Link requests (feature reticulum-py)
-        #[cfg(feature = "reticulum-py")]
-        #[arg(long)]
-        py_config: Option<PathBuf>,
     },
 }
 
@@ -80,15 +73,12 @@ enum Cmd {
 async fn main() {
     let cli = Cli::parse();
     let filter = match cli.verbose {
-        0 => "replica_rns_rs=info,reticulum=warn",
-        1 => "replica_rns_rs=debug,reticulum=info",
+        0 => "replica_rns_rs=info",
+        1 => "replica_rns_rs=debug",
         _ => "debug",
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(filter)).init();
-    #[cfg(feature = "reticulum-py")]
-    let Cmd::Replica { storage, bridge_socket, mixnet, forward, announce_interval, epoch_period, replica_epoch_epochs, max_storage_mib, min_free_storage_mib, py_config } = cli.cmd;
-    #[cfg(not(feature = "reticulum-py"))]
-    let (Cmd::Replica { storage, bridge_socket, mixnet, forward, announce_interval, epoch_period, replica_epoch_epochs, max_storage_mib, min_free_storage_mib }, py_config) = (cli.cmd, None);
+    let Cmd::Replica { storage, bridge_socket, mixnet, forward, announce_interval, epoch_period, replica_epoch_epochs, max_storage_mib, min_free_storage_mib } = cli.cmd;
     let config_dir = cli
         .config
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".reticulum"));
@@ -106,7 +96,6 @@ async fn main() {
         epoch_seconds: epoch_period * replica_epoch_epochs as f64,
         max_storage_bytes: max_storage_mib << 20,
         min_free_storage_bytes: min_free_storage_mib << 20,
-        py_config,
     };
     if let Err(e) = replica::run(o).await {
         eprintln!("replica_rns-rs: {e}");

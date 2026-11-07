@@ -81,9 +81,9 @@ empty name. A client in mode 2 uses only replicas announcing bit 1.
 
 Replicas ask each other in mode 2 first, when the other announces bit 2 (bit
 1 for a write), and as a Link request when it does not or mode 2 fails. One
-announcing bit 3, such as the Rust replica on Reticulum-rs, is asked only in
-mode 2, by replicas and by mode 1 clients alike. Python replicas serve both
-modes.
+announcing bit 3, such as the Rust replica when it ran on Reticulum-rs, is
+asked only in mode 2, by replicas and by mode 1 clients alike. Python and
+Rust replicas serve both modes.
 
 ### Channel framing
 
@@ -247,39 +247,23 @@ this.
 ## The Rust replica
 
 `rust/` is the same replica in Rust on
-[Reticulum-rs](https://github.com/BeechatNetworkSystemsLtd/Reticulum-rs), at
-the revision `katzenpost/pigeonhole_protocols` uses, with BACAP from the Rust
-`hpqc`. It keeps the store (the same SQLite file, with the same replica
-epochs, GC and storage limits and their options), open mode and sync, the
-bridge and its rules, the identity file and the command line, and reads the
-TCP and UDP interfaces of a Reticulum config file.
-Reticulum-rs has Links and Channel but no Link
-requests or Resources, so it speaks mode 2 alone, to clients and replicas,
-and announces bits 1, 2, 3 and 4; Python replicas ask it in mode 2. Clients
-subscribe on it in mode 2 alone.
+[berlinmesh/reticulum](https://git.emcomm.cc/berlinmesh/reticulum), pinned
+by commit, with BACAP from the Rust `hpqc`. It keeps the store (the same
+SQLite file, with the same replica epochs, GC and storage limits and their
+options), open mode and sync, push, the box sizes, the bridge and its rules,
+the identity file and the command line, and reads `enable_transport` and the
+TCP and UDP interfaces of a Reticulum config file. It serves both query
+modes and announces bits 1, 2 and 4, as Python replicas do, and asks other
+replicas as they do: in mode 2 first when they announce bit 2, then as a
+Link request unless they announce bit 3.
 
     cd rust && cargo build --release
     rust/target/release/replica_rns-rs --config ~/.reticulum replica --storage ~/pigeonhole
 
-Two limits of Reticulum-rs at that revision: as a transport node it does not
-relay to a Python node on the last hop (it keeps the transport header Python
-RNS expects stripped), so the Rust replica does not relay, whatever
-`enable_transport` says, and boxes cross it only stored and forwarded; and
-its TCP client interfaces do not set `TCP_NODELAY` (the replica's TCP server
-interface is its own and does).
-
-It asks other replicas in mode 2, so reaches those announcing bit 2. With the
-optional feature `reticulum-py` it also falls back to Link requests and
-Resources through Python RNS, embedded, for replicas that do not announce bit
-2 or when mode 2 fails, as Python replicas do:
-
-    cd rust && PYO3_PYTHON=$(which python) cargo build --release --features reticulum-py
-    rust/target/release/replica_rns-rs --config ~/.reticulum replica --storage ~/pigeonhole --py-config ~/.reticulum-py
-
-`--py-config` is the config directory of the Python Reticulum instance, with
-interfaces of its own, such as TCP clients of the other replicas' listeners
-(this replica does not relay); RNS and this package must be importable by
-that Python.
+The library's Link endpoint and Link driver carry Link requests and
+Resources; the replica runs a Channel on each Link itself, with the
+library's sans-IO Channel, on the one thread that owns the whole stack
+(`rust/src/net.rs`, modelled in `rust/quint`).
 
 ## Check a replica
 
